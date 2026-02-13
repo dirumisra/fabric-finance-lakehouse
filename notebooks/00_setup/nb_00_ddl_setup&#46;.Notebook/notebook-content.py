@@ -1,0 +1,247 @@
+# Fabric notebook source
+
+# METADATA ********************
+
+# META {
+# META   "kernel_info": {
+# META     "name": "synapse_pyspark"
+# META   },
+# META   "dependencies": {
+# META     "lakehouse": {
+# META       "default_lakehouse": "03b3ab34-e351-4757-ac65-28db43180f57",
+# META       "default_lakehouse_name": "lh_finance_core",
+# META       "default_lakehouse_workspace_id": "aa5bab7a-005d-4922-95fa-0edc2e6626e2",
+# META       "known_lakehouses": [
+# META         {
+# META           "id": "03b3ab34-e351-4757-ac65-28db43180f57"
+# META         }
+# META       ]
+# META     }
+# META   }
+# META }
+
+# MARKDOWN ********************
+
+# #### **Import Library**
+
+# CELL ********************
+
+from pyspark.sql.types import *
+from pyspark.sql import functions as F
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Create a Database**
+
+# CELL ********************
+
+spark.sql("CREATE DATABASE IF NOT EXISTS bronze")
+spark.sql("CREATE DATABASE IF NOT EXISTS silver")
+spark.sql("CREATE DATABASE IF NOT EXISTS gold")
+spark.sql("CREATE DATABASE IF NOT EXISTS meta")
+spark.sql("CREATE DATABASE IF NOT EXISTS log")
+spark.sql("CREATE DATABASE IF NOT EXISTS dq")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Verify The Database**
+
+# CELL ********************
+
+spark.sql("SHOW DATABASES").show(truncate=False)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Create meta ingestion_control**
+
+# CELL ********************
+
+
+ingestion_schema = StructType([
+    StructField("pipeline_name", StringType(), False),
+    StructField("entity_name", StringType(), False),
+    StructField("load_type", StringType(), False),           # FULL / INCR
+    StructField("last_watermark_ts", TimestampType(), True),
+    StructField("last_source_file", StringType(), True),
+    StructField("last_batch_id", StringType(), True),
+    StructField("status", StringType(), False),              # ACTIVE/INACTIVE
+    StructField("updated_at", TimestampType(), False),
+    StructField("updated_by", StringType(), False)
+])
+
+empty_df = spark.createDataFrame([], ingestion_schema)
+
+empty_df.write.format("delta") \
+    .mode("overwrite") \
+    .saveAsTable("meta.ingestion_control")
+
+print("Created: meta.ingestion_control")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Verify meta ingestion tables**
+
+# CELL ********************
+
+spark.sql("SHOW TABLES IN meta").show(truncate=False)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Create log pipeline_run_log**
+
+# CELL ********************
+
+log_schema = StructType([
+    StructField("run_id", StringType(), False),
+    StructField("pipeline_name", StringType(), False),
+    StructField("batch_id", StringType(), False),
+    StructField("env", StringType(), False),                 # DEV/UAT/PROD
+    StructField("start_ts", TimestampType(), False),
+    StructField("end_ts", TimestampType(), True),
+    StructField("status", StringType(), False),              # STARTED/SUCCESS/FAILED
+    StructField("rows_read", LongType(), True),
+    StructField("rows_written", LongType(), True),
+    StructField("error_message", StringType(), True),
+    StructField("created_at", TimestampType(), False)
+])
+
+empty_log_df = spark.createDataFrame([], log_schema)
+
+empty_log_df.write.format("delta") \
+    .mode("overwrite") \
+    .saveAsTable("log.pipeline_run_log")
+
+print("Created: log.pipeline_run_log")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Verify log pipeline tables**
+
+# CELL ********************
+
+spark.sql("SHOW TABLES IN log").show(truncate=False)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Control Record (PaySim)**
+
+# CELL ********************
+
+from pyspark.sql import functions as F
+
+target_schema = spark.table("meta.ingestion_control").schema
+print(target_schema)
+
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+from pyspark.sql import functions as F
+
+seed = [(
+    "pl_ingest_paysim",        # pipeline_name
+    "paysim_transactions",     # entity_name
+    "FULL",                    # load_type
+    None,                      # last_watermark_ts
+    None,                      # last_source_file
+    None,                      # last_batch_id
+    "ACTIVE",                  # status
+    None,                      # updated_at
+    None                       # updated_by
+)]
+
+df_seed = spark.createDataFrame(seed, schema=target_schema) \
+    .withColumn("updated_at", F.current_timestamp()) \
+    .withColumn("updated_by", F.lit("bootstrap"))
+
+df_seed.write.format("delta").mode("append").saveAsTable("meta.ingestion_control")
+
+print("Seed record inserted into meta.ingestion_control")
+
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Verify log pipeline tables**
+
+# CELL ********************
+
+spark.table("meta.ingestion_control").show(truncate=False)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
