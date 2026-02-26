@@ -1,0 +1,175 @@
+{
+  "properties": {
+    "activities": [
+      {
+        "type": "TridentNotebook",
+        "typeProperties": {
+          "notebookId": "f8c8777c-590a-ada0-4038-e279e2904c9c",
+          "workspaceId": "00000000-0000-0000-0000-000000000000",
+          "parameters": {
+            "p_env": {
+              "value": {
+                "value": "@pipeline().parameters.p_env",
+                "type": "Expression"
+              },
+              "type": "string"
+            },
+            "p_load_type": {
+              "value": {
+                "value": "@pipeline().parameters.p_load_type",
+                "type": "Expression"
+              },
+              "type": "string"
+            },
+            "p_source_file": {
+              "value": {
+                "value": "@pipeline().parameters.p_source_file",
+                "type": "Expression"
+              },
+              "type": "string"
+            },
+            "p_pipeline_run_id": {
+              "value": {
+                "value": "@pipeline().RunId",
+                "type": "Expression"
+              },
+              "type": "string"
+            }
+          }
+        },
+        "policy": {
+          "timeout": "0.12:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureInput": false,
+          "secureOutput": false
+        },
+        "name": "nb_bronze_ingest",
+        "dependsOn": []
+      },
+      {
+        "type": "TridentNotebook",
+        "typeProperties": {
+          "notebookId": "b5022e85-9cb0-9b7b-41ff-5cb7a0559179",
+          "workspaceId": "00000000-0000-0000-0000-000000000000",
+          "parameters": {
+            "p_env": {
+              "value": {
+                "value": "@pipeline().parameters.p_env",
+                "type": "Expression"
+              },
+              "type": "string"
+            },
+            "p_load_type": {
+              "value": {
+                "value": "@pipeline().parameters.p_load_type",
+                "type": "Expression"
+              },
+              "type": "string"
+            },
+            "p_source_file": {
+              "value": {
+                "value": "@pipeline().parameters.p_source_file",
+                "type": "Expression"
+              },
+              "type": "string"
+            },
+            "p_pipeline_run_id": {
+              "value": {
+                "value": "@pipeline().RunId",
+                "type": "Expression"
+              },
+              "type": "string"
+            }
+          }
+        },
+        "policy": {
+          "timeout": "0.12:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureInput": false,
+          "secureOutput": false
+        },
+        "name": "nb_silver_transform",
+        "dependsOn": [
+          {
+            "activity": "nb_bronze_ingest",
+            "dependencyConditions": [
+              "Completed"
+            ]
+          }
+        ]
+      },
+      {
+        "type": "TridentNotebook",
+        "typeProperties": {
+          "notebookId": "d5be0df8-256f-8661-473a-f228b600d8df",
+          "workspaceId": "00000000-0000-0000-0000-000000000000",
+          "parameters": {
+            "p_env": {
+              "value": {
+                "value": "@pipeline().parameters.p_env",
+                "type": "Expression"
+              },
+              "type": "string"
+            },
+            "p_load_type": {
+              "value": {
+                "value": "@pipeline().parameters.p_load_type",
+                "type": "Expression"
+              },
+              "type": "string"
+            },
+            "p_pipeline_run_id": {
+              "value": {
+                "value": "@pipeline().RunId",
+                "type": "Expression"
+              },
+              "type": "string"
+            },
+            "p_source_file": {
+              "value": {
+                "value": "@pipeline().parameters.p_source_file",
+                "type": "Expression"
+              },
+              "type": "string"
+            }
+          }
+        },
+        "policy": {
+          "timeout": "0.12:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureInput": false,
+          "secureOutput": false
+        },
+        "name": "nb_gold_build",
+        "dependsOn": [
+          {
+            "activity": "nb_silver_transform",
+            "dependencyConditions": [
+              "Completed"
+            ]
+          }
+        ]
+      }
+    ],
+    "parameters": {
+      "p_env": {
+        "type": "string",
+        "defaultValue": "DEV"
+      },
+      "p_load_type": {
+        "type": "string",
+        "defaultValue": "FULL"
+      },
+      "p_pipeline_run_id": {
+        "type": "string"
+      },
+      "p_source_file": {
+        "type": "string",
+        "defaultValue": "paysim_transactions_full_20260214.csv"
+      }
+    }
+  }
+}
