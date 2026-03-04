@@ -236,8 +236,44 @@ spark.table("meta.ingestion_control").show(truncate=False)
 # META   "language_group": "synapse_pyspark"
 # META }
 
+# MARKDOWN ********************
+
+# #### **Create Watermark / Control Table (Delta)**
+
 # CELL ********************
 
+from pyspark.sql import functions as F
+
+# 1) Create table (empty) if not exists
+spark.sql("""
+CREATE TABLE IF NOT EXISTS meta.etl_watermark (
+  pipeline_name STRING,
+  entity_name STRING,
+  last_success_ts TIMESTAMP,
+  last_success_batch_id STRING,
+  updated_at TIMESTAMP
+)
+USING DELTA
+""")
+
+# 2) Insert baseline row only if it doesn't exist
+spark.sql("""
+INSERT INTO meta.etl_watermark
+SELECT
+  'pl_finance_e2e_batch' AS pipeline_name,
+  'paysim_transactions' AS entity_name,
+  TIMESTAMP('1900-01-01 00:00:00') AS last_success_ts,
+  'INIT' AS last_success_batch_id,
+  current_timestamp() AS updated_at
+WHERE NOT EXISTS (
+  SELECT 1 FROM meta.etl_watermark
+  WHERE pipeline_name='pl_finance_e2e_batch'
+    AND entity_name='paysim_transactions'
+)
+""")
+
+# 3) Verify
+display(spark.sql("SELECT * FROM meta.etl_watermark"))
 
 # METADATA ********************
 

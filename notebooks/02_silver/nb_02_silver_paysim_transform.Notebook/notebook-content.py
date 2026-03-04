@@ -22,113 +22,158 @@
 
 # MARKDOWN ********************
 
-# #### **Silver Layer – PaySim Data Transformation & Standardization**
-# 
-# #### **Objective**
-# 
-# Transform raw transaction data from the Bronze layer into a clean,
-# validated, and business-ready dataset in the Silver layer.
-# 
-# The Silver layer ensures that all downstream analytics and modeling
-# are based on standardized and high-quality data.
-# 
-# ---
-# 
-# #### **Source**
-# 
-# - Input Table: `bronze.paysim_transactions_raw`
-# - Data Volume: ~6.3 million transaction records
-# - Contains raw fields + ingestion metadata
-# 
-# ---
-# 
-# #### **Why Silver Layer Is Required**
-# 
-# Bronze data is stored exactly as received, without enforcing
-# business rules or consistent naming standards.
-# 
-# If Bronze data is directly used for reporting:
-# 
-# - Column names may be inconsistent
-# - Invalid records may impact analytics
-# - Data types may not be enforced
-# - Business logic becomes scattered across reports
-# 
-# The Silver layer solves this by centralizing data preparation.
-# 
-# ---
-# 
-# #### **Transformations to Be Applied**
-# 
-# #### **1. Column Standardization**
-# - Convert column names to snake_case
-# - Rename business fields to meaningful names
-#   (e.g., nameOrig → origin_customer_id)
-# 
-# #### **2. Data Type Enforcement**
-# - Explicitly cast numeric and timestamp columns
-# - Ensure consistent schema for production reliability
-# 
-# #### **3. Derived Columns**
-# - Create event timestamp from `step`
-# - Generate transaction ID
-# - Add business indicators where required
-# 
-# #### **4. Data Quality Validation**
-# - Validate amount > 0
-# - Validate transaction type in allowed list
-# - Identify invalid or suspicious records
-# 
-# Invalid records will be written to:
-# `dq.paysim_rejects`
-# 
-# Valid records will be written to:
-# `silver.paysim_transactions_clean`
-# 
-# ---
-# 
-# #### **Outputs**
-# 
-# - `silver.paysim_transactions_clean`
-# - `dq.paysim_rejects`
-# 
-# These outputs will serve as the foundation for
-# Gold layer dimensional modeling and reporting.
-
-
-# MARKDOWN ********************
-
-# #### **Read Bronze Table**
-# 
-# This step loads the Bronze layer table into the Silver notebook.
-# 
-# Why?
-# Silver transformations must always use Bronze as input,
-# never raw files from landing.
-# 
-# This ensures:
-# - Clear medallion separation
-# - Reproducibility
-# - Controlled transformation pipeline
-
+# #### **import library**
 
 # CELL ********************
 
-# Step 5: Inspect and Preview Data in the Bronze Layer
-
+# Import PySpark SQL functions (like col, sum, max, when, etc.)
+# We use "F" as a short alias to make code cleaner (e.g., F.col("column_name"))
 from pyspark.sql import functions as F
 
-# Load the Bronze table into a DataFrame
-df_bronze = spark.table("bronze.paysim_transactions_raw")
+# Import Window functions
+# Used for operations like row_number(), rank(), lead(), lag() over partitions
+from pyspark.sql.window import Window
 
-# Print the total row count of the Bronze table
-print("Bronze Row Count:", df_bronze.count())
+# Import datetime module
+# Used to work with dates and timestamps (e.g., current time, formatting dates)
+from datetime import datetime
 
-# Display the schema (data types) of the Bronze table
-df_bronze.printSchema()
+# Import uuid module
+# Used to generate unique IDs (for example, unique transaction IDs or batch IDs)
+import uuid
 
-# Show the first 5 rows of the DataFrame without truncating any values
-df_bronze.show(5, truncate=False)
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Read pipeline parameters**
+
+# CELL ********************
+
+# ===============================
+# CELL-02: Read pipeline parameters (Enterprise)
+# ===============================
+
+# Function to safely read notebook parameters (Databricks widgets)
+# If the parameter does not exist, return None instead of failing
+def _get_param(name):
+    try:
+        return dbutils.widgets.get(name)  # Get widget value
+    except Exception:
+        return None  # Return None if widget is missing
+
+# Read all expected parameters from the notebook widgets
+p_env             = _get_param("p_env")               # Environment (DEV/UAT/PROD)
+p_load_type       = _get_param("p_load_type")         # Load type (FULL/INCR)
+p_source_file     = _get_param("p_source_file")       # Input source file name
+p_pipeline_run_id = _get_param("p_pipeline_run_id")   # Unique pipeline execution ID
+
+# Detect if this notebook is being run manually (not from pipeline)
+# Conditions for manual run:
+# - pipeline_run_id is None
+# - pipeline_run_id is empty
+# - pipeline_run_id equals "MANUAL_RUN"
+is_manual = (
+    (p_pipeline_run_id is None) or 
+    (str(p_pipeline_run_id).strip() == "") or 
+    (str(p_pipeline_run_id).upper() == "MANUAL_RUN")
+)
+
+# If manual execution, assign default DEV values
+if is_manual:
+    print("⚠️ Manual notebook run detected — using dev defaults")
+    
+    p_env = "DEV"  # Default environment
+    p_load_type = "FULL"  # Default load type
+    p_source_file = "paysim_transactions_full_20260214.csv"  # Default file
+    p_pipeline_run_id = "MANUAL_RUN"  # Default run ID
+
+# If pipeline execution, validate required parameters
+else:
+    # Create dictionary of required parameters
+    required = {
+        "p_env": p_env,
+        "p_load_type": p_load_type,
+        "p_source_file": p_source_file,
+        "p_pipeline_run_id": p_pipeline_run_id
+    }
+
+    # Check for missing or empty values
+    missing = [k for k, v in required.items() if v is None or str(v).strip() == ""]
+
+    # If any required parameter is missing, raise error
+    if missing:
+        raise Exception(f"Missing required parameters: {missing}")
+
+# Normalize values AFTER validation/default assignment
+# Convert to uppercase for consistency
+p_env = str(p_env).upper()
+p_load_type = str(p_load_type).upper()
+
+# Validate allowed environment values
+if p_env not in ["DEV", "UAT", "PROD"]:
+    raise Exception(f"Invalid p_env: {p_env}")
+
+# Validate allowed load type values
+if p_load_type not in ["FULL", "INCR"]:
+    raise Exception(f"Invalid p_load_type: {p_load_type}")
+
+# Print final parameter values for verification/logging
+print("✅ Parameters Loaded:")
+print("p_env =", p_env)
+print("p_load_type =", p_load_type)
+print("p_source_file =", p_source_file)
+print("p_pipeline_run_id =", p_pipeline_run_id)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Read Watermark (Silver Incremental Control)**
+
+# CELL ********************
+
+# ===============================
+# CELL-03: Read Watermark (Silver Incremental Control)
+# ===============================
+
+# Define the pipeline and entity (table) names
+# These are used to identify the correct watermark record
+pipeline_name = "pl_finance_e2e_batch"
+entity_name   = "paysim_transactions"
+
+# Read the last successful load timestamp from the watermark table
+# This timestamp tells us up to which point data was already processed
+watermark_row = spark.sql(f"""
+    SELECT last_success_ts
+    FROM meta.etl_watermark
+    WHERE pipeline_name = '{pipeline_name}'
+      AND entity_name   = '{entity_name}'
+""").limit(1).collect()   # Get only 1 row and convert result into a Python list
+
+# If no record is found, stop execution
+# This prevents accidental full reloads or incorrect incremental logic
+if len(watermark_row) == 0:
+    raise Exception(
+        f"❌ No watermark record found for pipeline_name='{pipeline_name}' "
+        f"and entity_name='{entity_name}'"
+    )
+
+# Extract the last_success_ts value from the returned row
+last_success_ts = watermark_row[0]["last_success_ts"]
+
+# Print the watermark value for logging and debugging
+print("✅ Watermark loaded. last_success_ts =", last_success_ts)
 
 # METADATA ********************
 
