@@ -184,7 +184,130 @@ print("✅ Watermark loaded. last_success_ts =", last_success_ts)
 
 # MARKDOWN ********************
 
-# #### **Standardize Column Names**
+# #### **Read Bronze Table**
+
+# CELL ********************
+
+# ===============================
+# CELL-04: Read Bronze Table
+# ===============================
+
+# Define the fully qualified Bronze table name
+# Format: workspace.database.schema.table
+# This table contains raw PaySim transaction data
+bronze_table = "ws_fab_finance_de_dev.lh_finance_core.bronze.paysim_transactions_raw"
+
+# Load the Bronze table into a Spark DataFrame
+# Spark reads the table metadata from the metastore
+df_bronze = spark.table(bronze_table)
+
+# Count total number of records
+# Helps verify that data exists and check volume before transformations
+print("Bronze Row Count:", df_bronze.count())
+
+# Print schema (column names and data types)
+# Important to validate structure before applying business logic
+df_bronze.printSchema()
+
+# Display first 5 records
+# truncate=False ensures full column values are visible
+df_bronze.show(5, truncate=False)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Incremental Filter (Silver)**
+
+# CELL ********************
+
+# ===============================
+# CELL-06: Incremental Filter (Silver)
+# ===============================
+
+from pyspark.sql import functions as F
+
+# -------------------------------------------------------
+# Safety Check: Ensure Bronze DataFrame exists
+# -------------------------------------------------------
+# This prevents execution if the Bronze read cell was not run
+try:
+    df_bronze
+except NameError:
+    raise Exception("❌ df_bronze not found. Read Bronze table first (Silver Cell-01/Cell-04).")
+
+# -------------------------------------------------------
+# Step 1: Read Watermark (Last Successful Ingestion Timestamp)
+# -------------------------------------------------------
+# This tells us up to which timestamp data was already processed
+watermark_df = spark.sql("""
+SELECT last_success_ts
+FROM meta.etl_watermark
+WHERE pipeline_name = 'pl_finance_e2e_batch'
+  AND entity_name   = 'paysim_transactions'
+""")
+
+# Validate watermark existence
+if watermark_df.count() == 0:
+    raise Exception("❌ No watermark record found for pl_finance_e2e_batch / paysim_transactions")
+
+# Extract watermark value
+last_success_ts = watermark_df.collect()[0]["last_success_ts"]
+
+print("✅ Watermark last_success_ts =", last_success_ts)
+
+# -------------------------------------------------------
+# Step 2: Apply Load Logic (FULL vs INCR)
+# -------------------------------------------------------
+
+if p_load_type == "INCR":
+    
+    # INCREMENTAL MODE:
+    # Filter only rows where ingestion timestamp is newer than watermark
+    df_bronze_incr = df_bronze.filter(
+        F.col("_ingest_ts") > F.lit(last_success_ts)
+    )
+    
+    print("✅ INCR mode: filtering rows where _ingest_ts >", last_success_ts)
+
+else:
+    
+    # FULL MODE:
+    # No filtering — process entire Bronze dataset
+    df_bronze_incr = df_bronze
+    
+    print("✅ FULL mode: no incremental filtering applied")
+
+# -------------------------------------------------------
+# Step 3: Validation Checks
+# -------------------------------------------------------
+
+# Compare total vs incremental rows
+print("Bronze total rows      =", df_bronze.count())
+print("Bronze incremental rows=", df_bronze_incr.count())
+
+# Preview incremental dataset (metadata columns only)
+df_bronze_incr.select(
+    "_ingest_ts",
+    "_batch_id",
+    "_source_file"
+).show(5, truncate=False)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### ****Standardize Column Names****
 # 
 # In Silver, we rename raw source columns into consistent, business-friendly names.
 # This makes downstream modeling (Gold star schema) and reporting much easier and less error-prone.
@@ -194,48 +317,74 @@ print("✅ Watermark loaded. last_success_ts =", last_success_ts)
 
 # CELL ********************
 
-# Silver Layer Transformation – Clean and Restructure Data
+# ===============================
+# CELL-07: Standardize Columns (Silver)
+# ===============================
 
 from pyspark.sql import functions as F
 
-# Transform the Bronze DataFrame into a Silver DataFrame with selected columns and proper data types
+# Select and standardize required columns from incrementally filtered Bronze data
 df_s1 = (
-    df_bronze.select(
-        # Step and transaction type columns
-        F.col("step").alias("step"),
+    df_bronze_incr.select(
+
+        # --------------------------------------------------
+        # Transaction Details
+        # --------------------------------------------------
+
+        # Convert step to integer for numeric processing
+        F.col("step").cast("int").alias("step"),
+
+        # Rename "type" to business-friendly column name
         F.col("type").alias("transaction_type"),
-        
-        # Amount column, cast to double for precise calculations
+
+        # Cast amount to double for financial calculations
         F.col("amount").cast("double").alias("amount"),
 
-        # Origin customer details and balance before/after the transaction
+        # --------------------------------------------------
+        # Origin Customer Details
+        # --------------------------------------------------
+
         F.col("nameOrig").alias("origin_customer_id"),
         F.col("oldbalanceOrg").cast("double").alias("origin_balance_before"),
         F.col("newbalanceOrig").cast("double").alias("origin_balance_after"),
 
-        # Destination customer details and balance before/after the transaction
+        # --------------------------------------------------
+        # Destination Customer Details
+        # --------------------------------------------------
+
         F.col("nameDest").alias("destination_customer_id"),
         F.col("oldbalanceDest").cast("double").alias("destination_balance_before"),
         F.col("newbalanceDest").cast("double").alias("destination_balance_after"),
 
-        # Fraud flags, cast to integers to maintain consistency
+        # --------------------------------------------------
+        # Fraud Indicators
+        # --------------------------------------------------
+
+        # Convert fraud flags to integer (0 or 1)
         F.col("isFraud").cast("int").alias("is_fraud"),
         F.col("isFlaggedFraud").cast("int").alias("is_flagged_fraud"),
 
-        # Ingestion metadata to ensure traceability through the pipeline
+        # --------------------------------------------------
+        # Ingestion Metadata (Critical for Audit & Watermark)
+        # --------------------------------------------------
+
+        # These fields help track batch processing and data lineage
         F.col("_ingest_ts"),
-        F.col("batch_id"),
+        F.col("_batch_id"),
         F.col("_source_file"),
-        F.col("_ingest_mode")
+        F.col("_ingest_mode"),
+        F.col("_env")
     )
 )
 
-# Print the schema of the transformed Silver DataFrame to inspect the column types
+# Log total rows after standardization
+print("✅ Silver standardization done. Rows =", df_s1.count())
+
+# Display schema to confirm data types and column names
 df_s1.printSchema()
 
-# Show the first 5 rows of the Silver DataFrame without truncating any values for detailed inspection
+# Preview first 5 records for validation
 df_s1.show(5, truncate=False)
-
 
 # METADATA ********************
 
@@ -262,35 +411,46 @@ df_s1.show(5, truncate=False)
 
 # CELL ********************
 
-# Step 7: Further Transformation – Adding Event Timestamps and Transaction Direction
+# ===============================
+# CELL-08: Create Derived Business Columns (Enterprise)
+# ===============================
 
 from pyspark.sql import functions as F
 
-# Define a base timestamp representing the starting point (2020-01-01 00:00:00)
-base_timestamp = F.to_timestamp(F.lit("2020-01-01 00:00:00"))
-
-# Create the Silver DataFrame with additional transformations
+# 1) event_ts: derive a timestamp from 'step' (PaySim step behaves like hours)
+base_ts = F.to_timestamp(F.lit("2020-01-01 00:00:00"))
 df_s2 = (
     df_s1
-    # Add event timestamp by adding 'step' (assumed to be in hours) to the base timestamp
-    .withColumn("event_ts", base_timestamp + F.col("step") * F.expr("INTERVAL 1 HOURS"))
-    
-    # Generate a unique transaction ID for each row
-    .withColumn("txn_id", F.monotonically_increasing_id())
-    
-    # Define transaction direction based on the transaction type
-    .withColumn(
-        "transaction_direction",
-        F.when(F.col("transaction_type").isin("CASH_OUT", "TRANSFER"), F.lit("DEBIT"))
-         .otherwise(F.lit("CREDIT"))
+    .withColumn("event_ts", base_ts + (F.col("step").cast("int") * F.expr("INTERVAL 1 HOURS")))
+)
+
+# 2) txn_id: deterministic (stable across reruns) using a hash of business keys
+#    NOTE: include columns that define uniqueness for your dataset
+df_s2 = df_s2.withColumn(
+    "txn_id",
+    F.sha2(
+        F.concat_ws(
+            "||",
+            F.col("step").cast("string"),
+            F.col("transaction_type").cast("string"),
+            F.col("amount").cast("string"),
+            F.col("origin_customer_id").cast("string"),
+            F.col("destination_customer_id").cast("string"),
+            F.col("_source_file").cast("string")
+        ),
+        256
     )
 )
 
-# Print the schema of the transformed DataFrame
-df_s2.printSchema()
+# 3) transaction_direction: business rule
+df_s2 = df_s2.withColumn(
+    "transaction_direction",
+    F.when(F.col("transaction_type").isin("CASH_OUT", "TRANSFER"), F.lit("DEBIT"))
+     .otherwise(F.lit("CREDIT"))
+)
 
-# Show the first 5 rows of the transformed DataFrame without truncating any values
-df_s2.show(5, truncate=False)
+print("✅ Derived columns added: event_ts, txn_id (stable hash), transaction_direction")
+df_s2.select("step","transaction_type","amount","event_ts","txn_id","transaction_direction").show(5, truncate=False)
 
 # METADATA ********************
 
@@ -317,83 +477,102 @@ df_s2.show(5, truncate=False)
 
 # CELL ********************
 
-# Step 8: Data Quality Checks – Validate and Flag Invalid Transactions
+# ===============================
+# CELL-08: Data Quality Checks – Validate and Split (Enterprise / Fabric-safe)
+# ===============================
 
 from pyspark.sql import functions as F
 
-# Define allowed transaction types for validation
+# --------------------------------------------------
+# Define Allowed Transaction Types (Business Rule)
+# --------------------------------------------------
+# Includes DEBIT as per your requirement
 allowed_types = ["CASH_IN", "CASH_OUT", "TRANSFER", "PAYMENT", "DEBIT"]
 
-# Apply data quality (DQ) checks and create new columns for the reasons and status
+# --------------------------------------------------
+# Apply Data Quality Validation Rules
+# --------------------------------------------------
+
 df_dq = (
     df_s2
-    # Add a new column "dq_reason" that concatenates multiple conditions
+
+    # Create a single string column (dq_reason)
+    # If multiple rules fail, they will be concatenated using " | "
     .withColumn(
         "dq_reason",
         F.concat_ws(
             " | ",
-            # Check for invalid amounts (null or non-positive)
-            F.when((F.col("amount").isNull()) | (F.col("amount") <= 0), F.lit("INVALID_AMOUNT")),
-            
-            # Check for invalid transaction types (not in allowed types)
-            F.when(~F.col("transaction_type").isin(allowed_types), F.lit("INVALID_TXN_TYPE")),
-            
-            # Check for missing customer IDs (either origin or destination missing)
-            F.when(F.col("origin_customer_id").isNull() | F.col("destination_customer_id").isNull(), F.lit("MISSING_CUSTOMER_ID")),
-            
-            # Check for negative balances (for origin or destination before/after transaction)
+
+            # Rule 1: Amount must not be NULL and must be > 0
             F.when(
-                (F.col("origin_balance_before") < 0) | (F.col("origin_balance_after") < 0) |
-                (F.col("destination_balance_before") < 0) | (F.col("destination_balance_after") < 0),
+                (F.col("amount").isNull()) | (F.col("amount") <= 0),
+                F.lit("INVALID_AMOUNT")
+            ),
+
+            # Rule 2: Transaction type must be in allowed list
+            F.when(
+                ~F.col("transaction_type").isin(*allowed_types),
+                F.lit("INVALID_TXN_TYPE")
+            ),
+
+            # Rule 3: Customer IDs must not be NULL
+            F.when(
+                F.col("origin_customer_id").isNull() |
+                F.col("destination_customer_id").isNull(),
+                F.lit("MISSING_CUSTOMER_ID")
+            ),
+
+            # Rule 4: Balances must not be negative
+            F.when(
+                (F.col("origin_balance_before") < 0) |
+                (F.col("origin_balance_after") < 0) |
+                (F.col("destination_balance_before") < 0) |
+                (F.col("destination_balance_after") < 0),
                 F.lit("NEGATIVE_BALANCE")
             )
         )
     )
-    # Create a "dq_status" column to flag valid or rejected rows based on "dq_reason"
+
+    # Assign final Data Quality status
+    # If dq_reason is empty → VALID
+    # If dq_reason contains any value → REJECT
     .withColumn(
         "dq_status",
-        F.when((F.col("dq_reason").isNull()) | (F.col("dq_reason") == ""), F.lit("VALID"))
-         .otherwise(F.lit("REJECT"))
+        F.when(
+            F.length(F.col("dq_reason")) == 0,
+            F.lit("VALID")
+        ).otherwise(F.lit("REJECT"))
     )
 )
 
-# Filter out the valid and rejected rows into separate DataFrames
-df_valid = df_dq.filter(F.col("dq_status") == "VALID").drop("dq_reason")
+# --------------------------------------------------
+# Split Data into VALID and REJECT
+# --------------------------------------------------
+
+# VALID records → drop dq_reason (clean data for Silver table)
+df_valid = (
+    df_dq
+    .filter(F.col("dq_status") == "VALID")
+    .drop("dq_reason")
+)
+
+# REJECT records → keep dq_reason for audit/debug
 df_reject = df_dq.filter(F.col("dq_status") == "REJECT")
 
-# Print the count of valid and rejected rows for review
-print("Valid rows:", df_valid.count())
-print("Reject rows:", df_reject.count())
+# --------------------------------------------------
+# Log Summary Counts
+# --------------------------------------------------
 
+print("✅ Valid rows :", df_valid.count())
+print("⚠️ Reject rows:", df_reject.count())
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# MARKDOWN ********************
-
-# #### **Outputs to Delta tables**
-
-# CELL ********************
-
-# Write Valid and Rejected Transactions to Separate Tables
-
-# Write the valid transactions to the Silver layer as a clean Delta table
-(df_valid.write.format("delta")
-    .mode("overwrite")  # Overwrite existing data in the Silver table
-    .saveAsTable("silver.paysim_transactions_clear"))  # Save to Silver layer
-
-# Write the rejected transactions (due to data quality issues) to a separate reject table
-(df_reject.write.format("delta")
-    .mode("overwrite")  # Overwrite existing data in the reject table
-    .saveAsTable("dq.paysim_rejects"))  # Save to the Rejects table for further investigation
-
-# Print confirmation that the tables have been created successfully
-print("Silver table created: silver.paysim_transactions_clear")
-print("Reject table created: dq.paysim_rejects")
+# Optional preview of rejected records
+df_reject.select(
+    "txn_id",
+    "transaction_type",
+    "amount",
+    "dq_reason"
+).show(10, truncate=False)
 
 # METADATA ********************
 
@@ -404,20 +583,76 @@ print("Reject table created: dq.paysim_rejects")
 
 # MARKDOWN ********************
 
-# #### **Quick Inspect Reject Reasons**
+# #### **Write VALID data to Silver**
 
 # CELL ********************
 
-# Step 10: Analyze Data Quality Rejects – Count Reject Reasons
+# =========================================
+# CELL-08A: Write VALID transactions to Silver
+# =========================================
+
+# Define target Silver table (Delta)
+silver_table = "silver.paysim_transactions_clear"
+
+# Determine write mode based on load type
+# FULL  -> overwrite existing table
+# INCR  -> append new records
+silver_mode = "overwrite" if p_load_type == "FULL" else "append"
+
+print(f"➡️ Writing VALID rows to {silver_table} | mode={silver_mode}")
+
+(df_valid.write
+    .format("delta")
+    .mode(silver_mode)
+    .option("overwriteSchema", "true")   # applied only when overwrite happens
+    .saveAsTable(silver_table)
+)
+
+valid_written = int(df_valid.count())
+print(f"✅ Silver write successful. Rows written = {valid_written}")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Write REJECT data to Quarantine (DQ)**
+
+# CELL ********************
+
+# ==========================================
+# CELL: Write REJECT transactions to Quarantine (DQ)
+# ==========================================
 
 from pyspark.sql import functions as F
 
-# Query the reject table to group by the rejection reason, count occurrences, and order by the most frequent reasons
-spark.table("dq.paysim_rejects") \
-    .groupBy("dq_reason") \
-    .count() \
-    .orderBy(F.col("count").desc()) \
-    .show(truncate=False)
+dq_table = "dq.paysim_rejects"
+dq_mode = "overwrite" if str(p_load_type).upper() == "FULL" else "append"
+
+print(f"➡️ Writing REJECT rows to {dq_table} | mode={dq_mode}")
+
+df_reject_out = (
+    df_reject
+    .withColumn("_reject_ts", F.current_timestamp())
+    .withColumn("_reject_batch_id", F.col("_batch_id"))   # take from data
+    .withColumn("_reject_run_id", F.lit(str(p_pipeline_run_id)))
+    .withColumn("_reject_env", F.lit(str(p_env)))
+)
+
+reject_written = int(df_reject_out.count())
+
+(df_reject_out.write
+    .format("delta")
+    .mode(dq_mode)
+    .option("overwriteSchema", "true")
+    .saveAsTable(dq_table)
+)
+
+print(f"✅ Quarantine write successful. Rows written = {reject_written}")
 
 # METADATA ********************
 
@@ -426,14 +661,75 @@ spark.table("dq.paysim_rejects") \
 # META   "language_group": "synapse_pyspark"
 # META }
 
+# MARKDOWN ********************
+
+# #### **Update watermark (ONLY after Valid and Reject succeeded)**
+
 # CELL ********************
 
-# Convert the Spark DataFrame to a Pandas DataFrame for better formatting
-df_rejects = spark.table("dq.paysim_rejects")
+# ==========================================
+# CELL: Update watermark ONLY after successful Silver + DQ writes
+# ==========================================
 
-# Display the first 10 rows in a nice tabular format
-df_rejects.limit(10).toPandas()
+from pyspark.sql import functions as F
 
+pipeline_name = "pl_finance_e2e_batch"
+entity_name   = "paysim_transactions"
+
+# Get latest ingest_ts and its matching batch_id from VALID data
+latest_row = (
+    df_valid
+    .select("_ingest_ts", "_batch_id")
+    .orderBy(F.col("_ingest_ts").desc())
+    .limit(1)
+    .collect()
+)
+
+# Enterprise hard-fail if no VALID rows
+if len(latest_row) == 0:
+    raise Exception("❌ Cannot update watermark: df_valid has 0 rows")
+
+new_watermark_ts = latest_row[0]["_ingest_ts"]
+new_batch_id     = latest_row[0]["_batch_id"]
+
+if new_watermark_ts is None:
+    raise Exception("❌ Cannot update watermark: new_watermark_ts is NULL")
+
+if new_batch_id is None:
+    raise Exception("❌ Cannot update watermark: new_batch_id is NULL")
+
+print("➡️ Updating watermark to:", new_watermark_ts, "batch:", new_batch_id)
+
+spark.sql(f"""
+UPDATE meta.etl_watermark
+SET last_success_ts = timestamp('{new_watermark_ts}'),
+    last_success_batch_id = '{new_batch_id}',
+    updated_at = current_timestamp()
+WHERE pipeline_name = '{pipeline_name}'
+  AND entity_name   = '{entity_name}'
+""")
+
+print("✅ Watermark updated successfully.")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Validate watermark update**
+
+# CELL ********************
+
+spark.sql("""
+SELECT *
+FROM meta.etl_watermark
+WHERE pipeline_name = 'pl_finance_e2e_batch'
+AND entity_name = 'paysim_transactions'
+""").show(truncate=False)
 
 # METADATA ********************
 
