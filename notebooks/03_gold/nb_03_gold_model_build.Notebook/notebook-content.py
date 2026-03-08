@@ -20,58 +20,90 @@
 # META   }
 # META }
 
+# CELL ********************
+
+# Import required libraries
+from delta.tables import DeltaTable
+from pyspark.sql import functions as F
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
 # MARKDOWN ********************
 
-# #### **Gold – Dimension Build: dim_transaction_type**
+# #### **Gold Layer – Build `dim_transaction_type`**
 # 
-# #### **Purpose**
-# Create a conformed transaction type dimension to standardize transaction classifications
-# across all reporting and analytics.
+# #### **Objective**
+# Create a conformed transaction type dimension table from the Silver layer.
 # 
 # #### **Why this dimension is needed**
-# Although transaction type exists as a string in the raw data, a dimension provides:
-# - Consistent naming and grouping
-# - Extra business attributes (direction, fraud-risk group)
-# - Cleaner star schema joins for Power BI
+# In the Silver table, `transaction_type` exists as a plain string column.  
+# For enterprise reporting and dimensional modeling, it is better to convert this into a separate dimension table.
+# 
+# **This helps us:**
+# 
+# - standardize transaction categories
+# - add reusable business attributes
+# - improve star schema design
+# - simplify joins in Power BI and Gold fact tables
+# 
+# **Business attributes added**
+# We will derive the following:
+# 
+# - `transaction_direction`  
+#   Indicates whether the transaction is treated as a **DEBIT** or **CREDIT**
+# 
+# - `risk_group`  
+#   Helps classify transaction types into **HIGH** or **NORMAL** risk buckets
+# 
+# **Target table**
+# `gold.dim_transaction_type`
+# 
+# **Source table**
+# `silver.paysim_transactions_clear`
 
 # CELL ********************
 
-from pyspark.sql import functions as F  # Import Spark SQL functions
-
-# -------------------------------------------------------------------
-# Step 1: Extract distinct transaction types from the Silver layer
-# -------------------------------------------------------------------
-# The Silver layer typically contains cleaned and standardized data.
-# We extract unique transaction types to build a dimension table.
+# ------------------------------------------------------------
+# STEP 1: Read distinct transaction types from Silver layer
+# ------------------------------------------------------------
+# We only need unique transaction_type values to build the dimension table.
 df_types = (
-    spark.table("silver.paysim_transactions_clear")  # Load cleaned transaction data
-    .select("transaction_type")                      # Keep only transaction_type column
-    .distinct()                                     # Remove duplicates (lazy transformation)
+    spark.table("silver.paysim_transactions_clear")  # Load Silver transactions table
+    .select("transaction_type")                      # Keep only the transaction_type column
+    .dropDuplicates()                                # Remove duplicate transaction types
 )
 
-# -------------------------------------------------------------------
-# Step 2: Enrich transaction types with business attributes
-# -------------------------------------------------------------------
-# We are building a dimension table (dim_transaction_type)
-# by deriving additional business classifications.
+# Debug check: show distinct transaction types before enrichment
+print("✅ Distinct transaction types found:", df_types.count())
+df_types.show(truncate=False)
 
+# ------------------------------------------------------------
+# STEP 2: Add business attributes
+# ------------------------------------------------------------
+# Enrich each transaction type with business-relevant columns:
+# 1. transaction_direction: DEBIT or CREDIT
+# 2. risk_group: HIGH or NORMAL
+# 3. transaction_type_key: unique surrogate key for dimension
 df_dim_txn_type = (
     df_types
 
-    # Classify transaction as DEBIT or CREDIT based on business logic
-    # DEBIT: Money going out
-    # CREDIT: Money coming in
+    # Assign transaction direction based on business rules
+    # CASH_OUT and TRANSFER are DEBIT, all others are CREDIT
     .withColumn(
         "transaction_direction",
         F.when(
-            F.col("transaction_type").isin("CASH_OUT", "TRANSFER", "DEBIT"),
+            F.col("transaction_type").isin("CASH_OUT", "TRANSFER"),
             F.lit("DEBIT")
         ).otherwise(F.lit("CREDIT"))
     )
 
-    # Assign risk category based on fraud/business rules
-    # HIGH: Transactions commonly associated with fraud patterns
-    # NORMAL: Other transaction types
+    # Classify risk group
+    # TRANSFER and CASH_OUT are HIGH risk, all others NORMAL
     .withColumn(
         "risk_group",
         F.when(
@@ -80,15 +112,14 @@ df_dim_txn_type = (
         ).otherwise(F.lit("NORMAL"))
     )
 
-    # Generate a surrogate key using xxhash64
-    # This creates a deterministic hash-based numeric key
-    # Cast to long for consistency in dimension table design
+    # Generate a deterministic surrogate key
+    # xxhash64 ensures the same transaction_type always gets the same numeric key
     .withColumn(
         "transaction_type_key",
         F.xxhash64(F.col("transaction_type")).cast("long")
     )
 
-    # Reorder/select final columns for the dimension table
+    # Select and reorder final columns for dimension table
     .select(
         "transaction_type_key",
         "transaction_type",
@@ -97,21 +128,24 @@ df_dim_txn_type = (
     )
 )
 
-# -------------------------------------------------------------------
-# Step 3: Write the dimension table to the Gold layer
-# -------------------------------------------------------------------
-# Gold layer contains curated, business-ready data models.
-# We overwrite the table to rebuild the dimension (full refresh approach).
+# Debug check: preview the enriched dimension dataframe
+print("✅ Preview of dim_transaction_type:")
+df_dim_txn_type.show(truncate=False)
 
+# ------------------------------------------------------------
+# STEP 3: Write dimension table to Gold layer
+# ------------------------------------------------------------
+# Gold dimensions are small lookup tables, so we overwrite the table entirely.
+# Using Delta format ensures ACID compliance, versioning, and schema enforcement.
 (
     df_dim_txn_type.write
-        .format("delta")                         # Store as Delta Lake table
-        .mode("overwrite")                       # Replace existing table
-        .option("overwriteSchema", "true")       # Allow schema overwrite
-        .saveAsTable("gold.dim_transaction_type")  # Save as managed table
+    .format("delta")                 # Delta format for reliability and performance
+    .mode("overwrite")               # Overwrite existing table
+    .option("overwriteSchema", "true") # Apply any schema changes
+    .saveAsTable("gold.dim_transaction_type") # Save as managed table in Gold layer
 )
 
-print("Created: gold.dim_transaction_type")
+print("✅ Created table: gold.dim_transaction_type")
 
 # METADATA ********************
 
@@ -122,11 +156,19 @@ print("Created: gold.dim_transaction_type")
 
 # MARKDOWN ********************
 
-# #### **# Read the Gold layer dimension table and display all columns without truncating values**
+# #### **Validate dim_transaction_type**
 
 # CELL ********************
 
-spark.table("gold.dim_transaction_type").show(truncate=False)
+# Load the newly created dimension table from Gold layer
+df_check = spark.table("gold.dim_transaction_type")
+
+# Check the total number of rows to ensure data was written correctly
+print("✅ Row count in gold.dim_transaction_type:", df_check.count())
+
+# Preview the contents of the table to manually verify correctness
+# truncate=False ensures all column values are fully displayed
+df_check.show(truncate=False)
 
 # METADATA ********************
 
@@ -137,137 +179,123 @@ spark.table("gold.dim_transaction_type").show(truncate=False)
 
 # MARKDOWN ********************
 
-# ### **Count the total number of records in the Gold dimension table**
+# #### **Gold Layer – Build `dim_date`**
+# 
+# #### **Objective**
+# Create a reusable date dimension table for time-based analysis.
+# 
+# #### **Why this dimension is needed**
+# The Silver table contains `event_ts`, which is a timestamp column.  
+# To support analytics and reporting, we build a proper date dimension so that fact tables can join to a conformed calendar.
+# 
+# This helps us:
+# 
+# - perform time-based reporting in Power BI
+# - group transactions by year, quarter, month, week, and day
+# - maintain a consistent date model across all fact tables
+# - improve star schema design
+# 
+# **Target table**
+# `gold.dim_date`
+# 
+# **Source table**
+# `silver.paysim_transactions_clear`
+# 
+# **Design approach**
+# 1. calculate the minimum and maximum transaction dates from Silver
+# 2. generate a full calendar range between those dates
+# 3. enrich the range with standard date attributes
+# 4. write the final dimension to Gold
 
 # CELL ********************
 
-spark.table("gold.dim_transaction_type").count()
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# MARKDOWN ********************
-
-# #### **Gold – Dimension Build: dim_date**
-# 
-# #### **Purpose**
-# Create a reusable date dimension to support time-based analysis
-# across all fact tables.
-# 
-# #### **Why needed**
-# Using a dedicated date dimension enables:
-# - Time intelligence in Power BI
-# - Consistent date filtering
-# - Partitioning strategy
-# - Clean star schema design
-# 
-# ***Generate date range based on Silver data min/max event_ts.***
-
-# CELL ********************
-
-from pyspark.sql import functions as F  # Import Spark SQL functions
-
-# -------------------------------------------------------------------
-# Step 1: Get minimum and maximum transaction date from Silver table
-# -------------------------------------------------------------------
-# We are reading the transaction table from the Silver layer.
-# The goal is to determine the full date range of available data.
-
+# ------------------------------------------------------------
+# STEP 1: Get minimum and maximum transaction dates
+# ------------------------------------------------------------
+# Use the 'event_ts' timestamp from the Silver layer as the base
+# This allows us to determine the full calendar range for the date dimension.
 date_range = (
-    spark.table("silver.paysim_transactions_clear")  # Load Silver table
-    
-    # Convert event_ts (timestamp column) to date
-    # Then calculate:
-    # - Minimum date in dataset
-    # - Maximum date in dataset
+    spark.table("silver.paysim_transactions_clear")  # Load Silver transactions table
     .select(
-        F.min(F.to_date("event_ts")).alias("min_date"),  # Earliest transaction date
-        F.max(F.to_date("event_ts")).alias("max_date")   # Latest transaction date
+        F.min(F.to_date("event_ts")).alias("min_date"),  # Earliest date in the data
+        F.max(F.to_date("event_ts")).alias("max_date")   # Latest date in the data
     )
-    
-    # collect() is an ACTION (triggers Spark execution)
-    # Since aggregation returns only one row, we extract first row using [0]
-    .collect()[0]
+    .collect()[0]  # Collect the result to a local Row object
 )
 
-# Extract values from the returned Row object
-min_date = date_range["min_date"]  # Store minimum date
-max_date = date_range["max_date"]  # Store maximum date
+# Extract min and max dates from the Row
+min_date = date_range["min_date"]
+max_date = date_range["max_date"]
 
-# Print results
-print("Min Dat", min_date)
-print("Max Dat", max_date)
+print("✅ Min Date:", min_date)
+print("✅ Max Date:", max_date)
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# MARKDOWN ********************
-
-# #### **Generate calendar:**
-
-# CELL ********************
-
-from pyspark.sql import functions as F  # Import Spark SQL functions
-
-# -------------------------------------------------------------------
-# Step 1: Create a sequence of dates from min_date to max_date
-# -------------------------------------------------------------------
-# - We use Spark SQL's sequence() function to generate all dates in the range
-# - explode() transforms the array of dates into individual rows
-# - This will serve as the base for our date dimension table
-
+# ------------------------------------------------------------
+# STEP 2: Generate a full date sequence
+# ------------------------------------------------------------
+# Create a DataFrame containing all dates from min_date to max_date
+# sequence(start, end, interval) generates an array of dates
+# explode(array) converts the array into individual rows
 df_dates = spark.sql(f"""
-SELECT explode(sequence(to_date('{min_date}'), to_date('{max_date}'), interval 1 day)) AS date
+SELECT explode(
+    sequence(
+        to_date('{min_date}'),  -- Start of date range
+        to_date('{max_date}'),  -- End of date range
+        interval 1 day           -- Step size: 1 day
+    )
+) AS date
 """)
 
-# -------------------------------------------------------------------
-# Step 2: Enrich the dates with common date attributes
-# -------------------------------------------------------------------
-# We are building a standard Date Dimension (dim_date) for analytics
+print("✅ Date sequence generated")
+df_dates.show(5, truncate=False)
+
+# ------------------------------------------------------------
+# STEP 3: Add standard calendar attributes
+# ------------------------------------------------------------
+# Enrich each date with attributes commonly used in analytics:
+# - date_key: integer key in YYYYMMDD format
+# - year, month, quarter, day, week_of_year, day_of_week
+# - month_name: full month name for readability
 df_dim_date = (
     df_dates
-
-    # Create a numeric surrogate key in the format YYYYMMDD
     .withColumn("date_key", F.date_format("date", "yyyyMMdd").cast("int"))
-
-    # Extract individual date attributes
-    .withColumn("year", F.year("date"))                   # Year part
-    .withColumn("month", F.month("date"))                 # Month number (1-12)
-    .withColumn("month_name", F.date_format("date", "MMMM"))  # Month name
-    .withColumn("day", F.dayofmonth("date"))             # Day of month
-    .withColumn("week_of_year", F.weekofyear("date"))     # Week number in year
-    .withColumn("quarter", F.quarter("date"))            # Quarter number (1-4)
-    .withColumn("day_of_week", F.date_format("date", "EEEE"))  # Day name (Monday, etc.)
-
-    # Select final columns and rename 'date' to 'full_date'
+    .withColumn("year", F.year("date"))
+    .withColumn("month", F.month("date"))
+    .withColumn("month_name", F.date_format("date", "MMMM"))
+    .withColumn("quarter", F.quarter("date"))
+    .withColumn("day", F.dayofmonth("date"))
+    .withColumn("week_of_year", F.weekofyear("date"))
+    .withColumn("day_of_week", F.date_format("date", "EEEE"))
+    # Reorder and rename columns for final dimension output
     .select(
         "date_key",
         F.col("date").alias("full_date"),
-        "year", "quarter", "month", "month_name",
-        "week_of_year", "day", "day_of_week"
+        "year",
+        "quarter",
+        "month",
+        "month_name",
+        "week_of_year",
+        "day",
+        "day_of_week"
     )
 )
 
-# -------------------------------------------------------------------
-# Step 3: Write the Date Dimension to Gold layer
-# -------------------------------------------------------------------
-# - Gold layer stores curated, business-ready dimension tables
-# - Using Delta format allows ACID transactions and time travel
-# - Mode "overwrite" ensures the table is fully refreshed
-(df_dim_date.write
- .format("delta")
- .mode("overwrite")
- .saveAsTable("gold.dim_date"))
+print("✅ Preview of dim_date:")
+df_dim_date.show(5, truncate=False)
 
-print("Created: gold.dim_date")
+# ------------------------------------------------------------
+# STEP 4: Write dim_date to Gold layer
+# ------------------------------------------------------------
+# Save the date dimension as a Delta table for downstream analytics
+(
+    df_dim_date.write
+    .format("delta")                 # Delta format for ACID compliance & performance
+    .mode("overwrite")               # Overwrite any existing table
+    .option("overwriteSchema", "true") # Apply any schema changes
+    .saveAsTable("gold.dim_date")    # Save as managed table in Gold layer
+)
+
+print("✅ Created table: gold.dim_date")
 
 # METADATA ********************
 
@@ -278,30 +306,25 @@ print("Created: gold.dim_date")
 
 # MARKDOWN ********************
 
-# #### **Validate the date dimension**
+# #### **Validate dim_date**
 
 # CELL ********************
 
-from pyspark.sql import functions as F  # Import Spark SQL functions
+# Load the dim_date table from the Gold layer
+df_check = spark.table("gold.dim_date")
 
-# -------------------------------------------------------------------
-# Step 1: Count the number of rows in the Date Dimension
-# -------------------------------------------------------------------
-# - This provides a quick check on whether the table was created correctly
-# - Should match the number of days between min_date and max_date + 1
-print("dim_date rows:", spark.table("gold.dim_date").count())
+# Check the total number of rows to ensure the full date range was created
+print("✅ Row count in gold.dim_date:", df_check.count())
 
-# -------------------------------------------------------------------
-# Step 2: Verify the minimum and maximum dates in dim_date
-# -------------------------------------------------------------------
-# - Ensures that the date dimension covers the expected full range
-# - Uses aggregation functions min() and max() on 'full_date' column
-# - show(truncate=False) prints full date without truncation
-spark.table("gold.dim_date").select(
-    F.min("full_date").alias("min_date"),  # Earliest date in dimension
-    F.max("full_date").alias("max_date")   # Latest date in dimension
+# Verify that the minimum and maximum dates match the expected range
+df_check.select(
+    F.min("full_date").alias("min_date"),  # Earliest date in the table
+    F.max("full_date").alias("max_date")   # Latest date in the table
 ).show(truncate=False)
 
+# Preview the first 5 rows to visually inspect the date attributes
+df_check.show(5, truncate=False)
+
 # METADATA ********************
 
 # META {
@@ -311,63 +334,104 @@ spark.table("gold.dim_date").select(
 
 # MARKDOWN ********************
 
-# #### **Gold – Dimension Build: dim_account**
+# #### **Gold Layer – Build `dim_account`**
 # 
-# #### **Purpose**
-# Create a conformed account dimension from origin and destination accounts.
+# #### **Objective**
+# Create a conformed account dimension from both origin and destination account identifiers.
 # 
-# #### **Why needed**
-# - Provides surrogate key
-# - Enables proper star schema joins
-# - Avoids joining fact table on raw string IDs
-# - Foundation for SCD Type 2 profile dimension
+# #### **Why this dimension is needed**
+# The Silver transaction table stores account identifiers as plain strings in two separate columns:
+# 
+# - `origin_customer_id`
+# - `destination_customer_id`
+# 
+# For a proper star schema, fact tables should not directly join to raw string identifiers.  
+# Instead, we create a reusable account dimension with a surrogate key.
+# 
+# This helps us:
+# 
+# - standardize account identifiers into one dimension
+# - simplify joins in the fact table
+# - improve star schema design
+# - prepare the model for future account-level enrichment
+# 
+# **Target table**
+# `gold.dim_account`
+# 
+# **Source table**
+# `silver.paysim_transactions_clear`
+# 
+# **Design approach**
+# 1. collect all distinct origin accounts
+# 2. collect all distinct destination accounts
+# 3. combine them into one account list
+# 4. generate a deterministic surrogate key
+# 5. write the final dimension to Gold
 
 
 # CELL ********************
 
-# Build Account Dimension
 
-from pyspark.sql import functions as F
-
-# Step 1: Collect all unique account IDs from transactions
-# We extract both sender (origin_customer_id) and receiver (destination_customer_id)
-# Then we rename both columns to a common name: account_id
-# UNION appends the two lists vertically
-# DISTINCT removes duplicate account IDs
-
-df_accounts = (
-    spark.table("silver.paysim_transactions_clear")  # Read transactions table from Silver layer
-    .select(F.col("origin_customer_id").alias("account_id"))  # Select sender accounts
-    .union(
-        spark.table("silver.paysim_transactions_clear")  # Read same table again
-        .select(F.col("destination_customer_id").alias("account_id"))  # Select receiver accounts
-    )
-    .distinct()  # Keep only unique account IDs
+# ------------------------------------------------------------
+# STEP 1: Read origin accounts from Silver layer
+# ------------------------------------------------------------
+# We extract the IDs of customers who are sending money
+df_origin_accounts = (
+    spark.table("silver.paysim_transactions_clear")  # Load Silver transactions table
+    .select(F.col("origin_customer_id").alias("account_id"))  # Rename column to 'account_id'
 )
 
-# Step 2: Add Surrogate Key
-# Generate a deterministic numeric key using xxhash64
-# Same account_id will always produce the same account_key
-# Cast to long for better performance in joins
+# ------------------------------------------------------------
+# STEP 2: Read destination accounts from Silver layer
+# ------------------------------------------------------------
+# We extract the IDs of customers who are receiving money
+df_destination_accounts = (
+    spark.table("silver.paysim_transactions_clear")
+    .select(F.col("destination_customer_id").alias("account_id"))  # Rename to match origin accounts
+)
 
+# ------------------------------------------------------------
+# STEP 3: Combine both account lists and keep only unique values
+# ------------------------------------------------------------
+# Merge origin and destination accounts into a single list and remove duplicates
+df_accounts = (
+    df_origin_accounts
+    .union(df_destination_accounts)  # Combine origin and destination accounts
+    .dropDuplicates()                # Keep only unique account IDs
+)
+
+# Quick check: see how many distinct accounts we have
+print("✅ Distinct accounts identified:", df_accounts.count())
+df_accounts.show(5, truncate=False)
+
+# ------------------------------------------------------------
+# STEP 4: Create surrogate key for accounts
+# ------------------------------------------------------------
+# Generate a deterministic numeric key using xxhash64
+# Ensures the same account_id always gets the same key for joins
 df_dim_account = (
     df_accounts
-    .withColumn(
-        "account_key",
-        F.xxhash64(F.col("account_id")).cast("long")  # Create surrogate key using hashing
-    )
-    .select("account_key", "account_id")  # Keep only required columns
+    .withColumn("account_key", F.xxhash64(F.col("account_id")).cast("long"))
+    .select("account_key", "account_id")  # Select final columns for dimension table
 )
 
-# Step 3: Write Dimension Table to Gold Layer
-# Save as Delta table
-# Mode "overwrite" replaces existing table if it exists
+# Preview the first few rows of the account dimension
+print("✅ Preview of dim_account:")
+df_dim_account.show(5, truncate=False)
 
-(df_dim_account.write
- .format("delta")              # Save in Delta format
- .mode("overwrite")            # Overwrite existing data
- .saveAsTable("gold.dim_account")  # Save as Gold layer dimension table
+# ------------------------------------------------------------
+# STEP 5: Write dim_account to Gold layer
+# ------------------------------------------------------------
+# Save as Delta table in Gold layer for analytics and joins
+(
+    df_dim_account.write
+    .format("delta")                 # Use Delta format for ACID compliance and performance
+    .mode("overwrite")               # Overwrite existing table if present
+    .option("overwriteSchema", "true") # Apply schema changes if necessary
+    .saveAsTable("gold.dim_account") # Save as managed table
 )
+
+print("✅ Created table: gold.dim_account")
 
 # METADATA ********************
 
@@ -378,163 +442,198 @@ df_dim_account = (
 
 # MARKDOWN ********************
 
-# #### **Gold – SCD Type 2: Account Profile Snapshot**
-# 
-# #### Purpose
-# Create a “current profile snapshot” for each account based on Silver transactions.
-# This snapshot will later be merged into the SCD2 dimension to preserve history.
-# 
-# #### **What we derive**
-# - txn_count, total_amount
-# - fraud involvement flag
-# - activity_segment (LOW/MEDIUM/HIGH)
-# - risk_tier (LOW/HIGH)
-
+# #### **Validate dim_account**
 
 # CELL ********************
 
-from pyspark.sql import functions as F
+# Load the newly created account dimension table from the Gold layer
+df_check = spark.table("gold.dim_account")
 
-# -----------------------------------------------------------
-# STEP 0: Load cleaned transaction data from Silver layer
-# -----------------------------------------------------------
-# This table contains transaction-level data with:
-# - origin_customer_id (sender)
-# - destination_customer_id (receiver)
-# - amount
-# - is_fraud flag
+# Quick sanity check: total number of distinct accounts
+print("✅ Row count in gold.dim_account:", df_check.count())
+
+# Preview the first 5 rows to ensure the surrogate keys and account IDs look correct
+df_check.show(5, truncate=False)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Gold Layer – Build Account Profile Snapshot**
+# 
+# #### **Objective**
+# Create a current account profile snapshot from the Silver transaction table.
+# 
+# #### **Why this step is needed**
+# The account dimension (`gold.dim_account`) only stores the account identifier and surrogate key.
+# 
+# For business analytics, we also need profile-level attributes such as:
+# 
+# - transaction activity level
+# - total transaction amount
+# - fraud involvement
+# - risk classification
+# 
+# This snapshot will later be used as the source for building a Slowly Changing Dimension Type 2 (SCD2).
+# 
+# **Target dataframe**
+# `df_snapshot`
+# 
+# **Source table**
+# `silver.paysim_transactions_clear`
+# 
+# **Design approach**
+# 
+# 1. create outgoing transaction metrics for each account
+# 2. create incoming transaction metrics for each account
+# 3. combine both sides into one profile
+# 4. derive business segments
+# 5. join with `gold.dim_account` to attach surrogate keys
+
+# CELL ********************
+
+# ------------------------------------------------------------
+# STEP 1: Load Silver transactions
+# ------------------------------------------------------------
+# Read the cleaned transaction dataset from the Silver layer.
+# This table contains all transactions used to derive account metrics.
 df_silver = spark.table("silver.paysim_transactions_clear")
 
+# ------------------------------------------------------------
+# STEP 2: Calculate OUTGOING metrics by account
+# ------------------------------------------------------------
+# These metrics are based on origin_customer_id
+# (i.e., accounts that SEND money)
 
-# -----------------------------------------------------------
-# STEP 1: Create OUTGOING transaction metrics per account
-# -----------------------------------------------------------
-# We group by origin_customer_id (sender account)
-# and calculate:
-# - total number of outgoing transactions
-# - total outgoing amount
-# - whether this account was involved in fraud (as sender)
 df_origin = (
     df_silver
-    .groupBy(F.col("origin_customer_id").alias("account_id"))
+    .groupBy(F.col("origin_customer_id").alias("account_id"))  # Treat origin customer as account_id
     .agg(
-        F.count("*").alias("out_txn_count"),          # number of outgoing transactions
-        F.sum("amount").alias("out_total_amount"),   # total money sent
-        F.max("is_fraud").alias("out_fraud_flag")    # 1 if any outgoing txn was fraud
+        F.count("*").alias("out_txn_count"),       # Number of outgoing transactions
+        F.sum("amount").alias("out_total_amount"), # Total amount sent
+        F.max("is_fraud").alias("out_fraud_flag")  # If any outgoing txn was fraud → flag becomes 1
     )
 )
 
+print("✅ Outgoing account metrics ready")
+df_origin.show(5, truncate=False)
 
-# -----------------------------------------------------------
-# STEP 2: Create INCOMING transaction metrics per account
-# -----------------------------------------------------------
-# We group by destination_customer_id (receiver account)
-# and calculate:
-# - total number of incoming transactions
-# - total incoming amount
-# - whether this account was involved in fraud (as receiver)
+# ------------------------------------------------------------
+# STEP 3: Calculate INCOMING metrics by account
+# ------------------------------------------------------------
+# These metrics are based on destination_customer_id
+# (i.e., accounts that RECEIVE money)
+
 df_dest = (
     df_silver
-    .groupBy(F.col("destination_customer_id").alias("account_id"))
+    .groupBy(F.col("destination_customer_id").alias("account_id"))  # Treat destination customer as account_id
     .agg(
-        F.count("*").alias("in_txn_count"),           # number of incoming transactions
-        F.sum("amount").alias("in_total_amount"),    # total money received
-        F.max("is_fraud").alias("in_fraud_flag")     # 1 if any incoming txn was fraud
+        F.count("*").alias("in_txn_count"),        # Number of incoming transactions
+        F.sum("amount").alias("in_total_amount"),  # Total amount received
+        F.max("is_fraud").alias("in_fraud_flag")   # If any incoming txn was fraud → flag becomes 1
     )
 )
 
+print("✅ Incoming account metrics ready")
+df_dest.show(5, truncate=False)
 
-# -----------------------------------------------------------
-# STEP 3: Combine outgoing + incoming into one account profile
-# -----------------------------------------------------------
-# 1. Stack (union) both datasets together
-# 2. Group again by account_id
-# 3. Add outgoing + incoming values
-# 4. Create overall totals and fraud flag
+# ------------------------------------------------------------
+# STEP 4: Combine outgoing + incoming metrics
+# ------------------------------------------------------------
+# Some accounts may appear only as senders or only as receivers.
+# unionByName merges both datasets while keeping column alignment.
+
 df_profile = (
     df_origin
     .unionByName(df_dest, allowMissingColumns=True)
+
+    # Re-aggregate after union so each account has one record
     .groupBy("account_id")
     .agg(
-        # Replace nulls with 0 before summing
         F.sum(F.coalesce(F.col("out_txn_count"), F.lit(0))).alias("out_txn_count"),
         F.sum(F.coalesce(F.col("in_txn_count"), F.lit(0))).alias("in_txn_count"),
         F.sum(F.coalesce(F.col("out_total_amount"), F.lit(0.0))).alias("out_total_amount"),
         F.sum(F.coalesce(F.col("in_total_amount"), F.lit(0.0))).alias("in_total_amount"),
-
-        # If fraud happened even once, mark flag as 1
         F.max(F.coalesce(F.col("out_fraud_flag"), F.lit(0))).alias("out_fraud_flag"),
         F.max(F.coalesce(F.col("in_fraud_flag"), F.lit(0))).alias("in_fraud_flag")
     )
 
-    # Total transactions = incoming + outgoing
-    .withColumn("total_txn_count",
-                F.col("out_txn_count") + F.col("in_txn_count"))
+    # Calculate total transactions across incoming + outgoing
+    .withColumn("total_txn_count", F.col("out_txn_count") + F.col("in_txn_count"))
 
-    # Total money movement
-    .withColumn("total_amount",
-                F.col("out_total_amount") + F.col("in_total_amount"))
+    # Calculate total money movement for the account
+    .withColumn("total_amount", F.col("out_total_amount") + F.col("in_total_amount"))
 
-    # If fraud occurred either incoming or outgoing → mark account as fraud involved
+    # Flag if the account was involved in any fraud transaction
     .withColumn(
         "fraud_involved_flag",
         F.when(
-            (F.col("out_fraud_flag") == 1) |
-            (F.col("in_fraud_flag") == 1),
+            (F.col("out_fraud_flag") == 1) | (F.col("in_fraud_flag") == 1),
             F.lit(1)
         ).otherwise(F.lit(0))
     )
 )
 
+print("✅ Combined account profile created")
+df_profile.show(5, truncate=False)
 
-# -----------------------------------------------------------
-# STEP 4: Create Business Segments (Enterprise-style Bucketing)
-# -----------------------------------------------------------
-# We classify accounts into:
-# - Activity segment (HIGH / MEDIUM / LOW)
-# - Risk tier (HIGH if fraud involved, else LOW)
-# Then we join with dimension table to get surrogate key.
+# ------------------------------------------------------------
+# STEP 5: Add business segmentation attributes
+# ------------------------------------------------------------
+# These fields classify accounts based on activity and risk.
+
 df_snapshot = (
     df_profile
 
-    # Activity segmentation based on total transactions
+    # Activity level segmentation based on number of transactions
     .withColumn(
         "activity_segment",
-        F.when(F.col("total_txn_count") >= 50, F.lit("HIGH"))
-         .when(F.col("total_txn_count") >= 10, F.lit("MEDIUM"))
-         .otherwise(F.lit("LOW"))
+        F.when(F.col("total_txn_count") >= 50, F.lit("HIGH"))     # Very active accounts
+         .when(F.col("total_txn_count") >= 10, F.lit("MEDIUM"))   # Moderately active accounts
+         .otherwise(F.lit("LOW"))                                 # Low activity accounts
     )
 
-    # Risk tier based on fraud involvement
+    # Risk classification based on fraud involvement
     .withColumn(
         "risk_tier",
         F.when(F.col("fraud_involved_flag") == 1, F.lit("HIGH"))
          .otherwise(F.lit("LOW"))
     )
+)
 
-    # Join with Gold dimension table to get surrogate key (account_key)
+print("✅ Business segments added")
+df_snapshot.show(5, truncate=False)
+
+# ------------------------------------------------------------
+# STEP 6: Join with dim_account to attach surrogate key
+# ------------------------------------------------------------
+# The Gold fact tables should use surrogate keys instead of raw IDs.
+# We join with the account dimension to retrieve account_key.
+
+df_snapshot = (
+    df_snapshot
     .join(
         spark.table("gold.dim_account"),
         on="account_id",
         how="inner"
     )
-
-    # Select final columns for snapshot table
     .select(
-        "account_key",
-        "account_id",
-        "total_txn_count",
-        "total_amount",
-        "activity_segment",
-        "risk_tier",
-        "fraud_involved_flag"
+        "account_key",          # Surrogate key from dimension
+        "account_id",           # Natural key
+        "total_txn_count",      # Total number of transactions
+        "total_amount",         # Total money movement
+        "activity_segment",     # Business activity classification
+        "risk_tier",            # Risk classification
+        "fraud_involved_flag"   # Fraud indicator
     )
 )
 
-# -----------------------------------------------------------
-# STEP 5: Validate output
-# -----------------------------------------------------------
-print("Snapshot rows:", df_snapshot.count())
+print("✅ Final account profile snapshot ready")
 df_snapshot.show(5, truncate=False)
 
 # METADATA ********************
@@ -546,63 +645,99 @@ df_snapshot.show(5, truncate=False)
 
 # MARKDOWN ********************
 
-# #### **Gold - SCD Type 2 Merge: dim_account_profile_scd2**
-# 
-# #### **Purpose**
-# Maintain historical account profile changes using Delta MERGE.
-# 
-# If account attributes change:
-# - Expire old record
-# - Insert new version
-# - Preserve history
-# 
-# This enables time-based behavioral analysis.
-
-# MARKDOWN ********************
-
-# **Create SCD2 Table (First Time Only)**
+# #### **Validate account profile snapshot**
 
 # CELL ********************
 
-from pyspark.sql import functions as F
 
-# -----------------------------------------------------------
+print("✅ Snapshot row count:", df_snapshot.count())
+df_snapshot.show(10, truncate=False)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Gold Layer – Create Initial SCD2 Table**
+# 
+# #### **Objective**
+# Create the initial Slowly Changing Dimension Type 2 table for account profiles.
+# 
+# #### **Why this table is needed**
+# The account profile snapshot contains the **current** state of each account.
+# 
+# However, in enterprise data platforms, account attributes can change over time, such as:
+# 
+# - activity segment
+# - risk tier
+# - fraud involvement
+# - total transaction behavior
+# 
+# To preserve history, we create an SCD Type 2 table.
+# 
+# #### **SCD Type 2 fields**
+# This table includes:
+# 
+# - `effective_start_date`  
+#   The timestamp when the record became active
+# 
+# - `effective_end_date`  
+#   The timestamp when the record was closed (NULL for current records)
+# 
+# - `is_current`  
+#   Flag indicating whether the record is the latest active version
+# 
+# **Target table**
+# `gold.dim_account_profile_scd2`
+# 
+# **Source dataframe**
+# `df_snapshot`
+
+# CELL ********************
+
+# ------------------------------------------------------------
 # STEP 1: Add SCD2 tracking columns
-# -----------------------------------------------------------
-# We are preparing the account snapshot for SCD2 handling.
-# For each account row, we add:
-# - effective_start_date: when this record becomes active
-# - effective_end_date: null for current record (will be updated when replaced)
-# - is_current: True if this record is the active version
+# ------------------------------------------------------------
+# We prepare the first version of the Slowly Changing Dimension Type 2 table.
+# SCD2 keeps historical versions of records when attributes change.
+
 df_scd2_init = (
     df_snapshot
-    .withColumn("effective_start_date", F.current_timestamp())  # start of validity
-    .withColumn("effective_end_date", F.lit(None).cast("timestamp"))  # no end yet
-    .withColumn("is_current", F.lit(True))  # current record
+
+    # Timestamp when this version of the record becomes active
+    .withColumn("effective_start_date", F.current_timestamp())
+
+    # End timestamp of the record.
+    # For the current active record, this remains NULL.
+    .withColumn("effective_end_date", F.lit(None).cast("timestamp"))
+
+    # Flag indicating whether this record is the current active version
+    .withColumn("is_current", F.lit(True))
 )
 
+print("✅ SCD2 initial dataframe prepared")
+df_scd2_init.show(5, truncate=False)
 
-# -----------------------------------------------------------
-# STEP 2: Save as Delta table (initial load)
-# -----------------------------------------------------------
-# Using overwrite mode since this is the very first load.
-(df_scd2_init.write
- .format("delta")                       # Delta Lake format for ACID & SCD2 handling
- .mode("overwrite")                     # first load, so replace if exists
- .saveAsTable("gold.dim_account_profile_scd2"))
+# ------------------------------------------------------------
+# STEP 2: Write initial SCD2 table to Gold
+# ------------------------------------------------------------
+# We store the initial snapshot as a Delta table.
+# Future pipeline runs will update this table using SCD2 logic
+# (closing old records and inserting new versions when changes occur).
 
-print("Created: gold.dim_account_profile_scd2 (initial load)")
+(
+    df_scd2_init.write
+    .format("delta")                 # Delta Lake format for ACID transactions
+    .mode("overwrite")               # Initial load overwrites any existing table
+    .option("overwriteSchema", "true") # Ensure schema updates are applied
+    .saveAsTable("gold.dim_account_profile_scd2")  # Create Gold dimension table
+)
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-spark.table("gold.dim_account_profile_scd2").count()
+print("✅ Created table: gold.dim_account_profile_scd2")
 
 # METADATA ********************
 
@@ -613,97 +748,142 @@ spark.table("gold.dim_account_profile_scd2").count()
 
 # MARKDOWN ********************
 
-# #### **SCD Type 2 MERGE Logic**
+# #### **Gold Layer – SCD Type 2 MERGE Logic**
 # 
-# This step keeps historical versions of account profiles.
+# #### **Objective**
+# Maintain historical account profile records using Slowly Changing Dimension Type 2 logic.
 # 
-# Rules:
-# - If account exists and attributes changed → expire old row + insert new version
-# - If account exists and no change → no action
-# - If account is new → insert
+# #### **Why this step is needed**
+# The initial SCD2 table created in the previous step only represents the baseline profile.
 # 
-# This enables time-travel analysis of account behavior and risk.
+# In future runs, account attributes may change, for example:
 # 
-# **Delta MERGE**
+# - total transaction count
+# - total transaction amount
+# - activity segment
+# - risk tier
+# - fraud involvement flag
+# 
+# When such changes occur, we should not overwrite the old row.
+# 
+# Instead, SCD Type 2 requires that we:
+# 
+# 1. close the old record  
+# 2. insert a new active version  
+# 3. retain full history for audit and analysis  
+# 
+# **Change detection logic**
+# A record is considered changed when any of the tracked business attributes differ between:
+# 
+# - current snapshot (`df_snapshot`)
+# - active record in `gold.dim_account_profile_scd2`
+# 
+# **Target table**
+# `gold.dim_account_profile_scd2`
 
 # CELL ********************
 
-from delta.tables import DeltaTable
-from pyspark.sql import functions as F
-
-# -----------------------------------------------------------
-# STEP 1: Define target table (SCD2 dimension table)
-# -----------------------------------------------------------
+# ------------------------------------------------------------
+# STEP 1: Define target table
+# ------------------------------------------------------------
+# This is the SCD2 dimension table that stores historical versions
+# of account profiles.
 target_table = "gold.dim_account_profile_scd2"
 
-# -----------------------------------------------------------
-# STEP 2: Prepare source snapshot for this run
-# -----------------------------------------------------------
-# We add a merge timestamp that will:
-# - Close old records (effective_end_date)
-# - Start new records (effective_start_date)
+# ------------------------------------------------------------
+# STEP 2: Prepare source snapshot with merge timestamp
+# ------------------------------------------------------------
+# df_snapshot contains the latest account profile metrics.
+# We add a timestamp column that represents when this merge run happens.
+# This timestamp will be used to close old records and start new ones.
 df_src = (
-    df_snapshot.withColumn("merge_run_ts", F.current_timestamp())
+    df_snapshot
+    .withColumn("merge_run_ts", F.current_timestamp())
 )
 
-# -----------------------------------------------------------
+print("✅ Source snapshot prepared for MERGE")
+df_src.show(5, truncate=False)
+
+# ------------------------------------------------------------
 # STEP 3: Load target Delta table
-# -----------------------------------------------------------
-# DeltaTable allows us to perform MERGE (upsert) operations
+# ------------------------------------------------------------
+# DeltaTable API allows us to perform MERGE operations
+# (similar to SQL MERGE / UPSERT).
 dt = DeltaTable.forName(spark, target_table)
 
-# -----------------------------------------------------------
-# STEP 4: Define change detection logic
-# -----------------------------------------------------------
-# We only expire records when:
-# - The record is currently active (is_current = true)
-# - AND any business column has changed
+# ------------------------------------------------------------
+# STEP 4: Define change detection condition
+# ------------------------------------------------------------
+# We compare current values in the SCD2 table (t) with the
+# new snapshot values (s).
+#
+# If any business attribute has changed, we consider the record
+# to be updated and must close the previous version.
 change_condition = """
 t.is_current = true AND (
-  t.total_txn_count <> s.total_txn_count OR
-  round(t.total_amount,2) <> round(s.total_amount,2) OR
-  t.activity_segment <> s.activity_segment OR
-  t.risk_tier <> s.risk_tier OR
-  t.fraud_involved_flag <> s.fraud_involved_flag
+    t.total_txn_count <> s.total_txn_count OR
+    round(t.total_amount, 2) <> round(s.total_amount, 2) OR
+    t.activity_segment <> s.activity_segment OR
+    t.risk_tier <> s.risk_tier OR
+    t.fraud_involved_flag <> s.fraud_involved_flag
 )
 """
 
-# -----------------------------------------------------------
-# STEP 5: Perform SCD2 MERGE
-# -----------------------------------------------------------
+# ------------------------------------------------------------
+# STEP 5: Perform SCD2 MERGE operation
+# ------------------------------------------------------------
 # Logic:
-# 1. If matched AND changed → expire old record
-# 2. If not matched → insert new record
-dt.alias("t").merge(
-    df_src.alias("s"),
-    # Match on business key + only active records
-    "t.account_key = s.account_key AND t.is_current = true"
+# 1. If a matching account exists AND attributes changed:
+#       → expire the current row
+# 2. If account does not exist:
+#       → insert a new record
+# 3. If account exists but nothing changed:
+#       → do nothing
 
-# CASE 1: If matched AND data changed → expire old record
-).whenMatchedUpdate(
-    condition=change_condition,
-    set={
-        "effective_end_date": "s.merge_run_ts",  # close record
-        "is_current": "false"                    # mark as inactive
-    }
+(
+    dt.alias("t")   # target table alias
+    .merge(
+        df_src.alias("s"),   # source snapshot alias
+        "t.account_key = s.account_key AND t.is_current = true"
+    )
 
-# CASE 2: If no current record exists → insert new record    
-).whenNotMatchedInsert(
-    values={
-        "account_key": "s.account_key",
-        "account_id": "s.account_id",
-        "total_txn_count": "s.total_txn_count",
-        "total_amount": "s.total_amount",
-        "activity_segment": "s.activity_segment",
-        "risk_tier": "s.risk_tier",
-        "fraud_involved_flag": "s.fraud_involved_flag",
-        "effective_start_date": "s.merge_run_ts",   # new version start
-        "effective_end_date": "cast(null as timestamp)",
-        "is_current": "true"
-    }
-).execute()
+    # --------------------------------------------------------
+    # CASE 1: Account exists and attributes changed
+    # --------------------------------------------------------
+    # Expire the current record by setting end date
+    # and marking it as not current.
+    .whenMatchedUpdate(
+        condition=change_condition,
+        set={
+            "effective_end_date": "s.merge_run_ts",
+            "is_current": "false"
+        }
+    )
 
-print("SCD2 MERGE completed")
+    # --------------------------------------------------------
+    # CASE 2: Account does not exist in the SCD2 table
+    # --------------------------------------------------------
+    # Insert a brand new record.
+    .whenNotMatchedInsert(
+        values={
+            "account_key": "s.account_key",
+            "account_id": "s.account_id",
+            "total_txn_count": "s.total_txn_count",
+            "total_amount": "s.total_amount",
+            "activity_segment": "s.activity_segment",
+            "risk_tier": "s.risk_tier",
+            "fraud_involved_flag": "s.fraud_involved_flag",
+            "effective_start_date": "s.merge_run_ts",
+            "effective_end_date": "cast(null as timestamp)",
+            "is_current": "true"
+        }
+    )
+
+    # Execute the MERGE operation
+    .execute()
+)
+
+print("✅ SCD2 MERGE completed")
 
 # METADATA ********************
 
@@ -714,59 +894,77 @@ print("SCD2 MERGE completed")
 
 # MARKDOWN ********************
 
-# #### **Find accounts where current row was expired in this run (effective_end_date set recently)**
-# #### **We'll insert new current version from snapshot**
-
+# #### **Insert New Current Versions**
+# 
+# The previous MERGE step expires changed records, but it does not automatically insert the new active version for those expired accounts.
+# 
+# So in this step, we:
+# 
+# 1. identify accounts whose current records were expired  
+# 2. fetch the latest snapshot for those accounts  
+# 3. append new active records into the SCD2 table
 
 # CELL ********************
 
-# -----------------------------------------------------------
-# STEP 1: Identify accounts whose old versions were expired
-# -----------------------------------------------------------
-# We look inside the target SCD2 table and find:
-# - Records that are no longer current (is_current = false)
-# - AND have an effective_end_date (meaning they were closed)
+# ------------------------------------------------------------
+# STEP 1: Identify accounts whose current records were expired
+# ------------------------------------------------------------
+# After the SCD2 MERGE (CELL-17), any record that experienced
+# a change will have:
+#   is_current = false
+#   effective_end_date != NULL
 #
-# These accounts need a new active version inserted.
+# These represent accounts whose previous version was closed.
+# We extract those account_keys so we can create their
+# new "current" versions.
 df_changed = (
     spark.table(target_table)
     .filter("is_current = false AND effective_end_date IS NOT NULL")
     .select("account_key")
-    .distinct()   # Avoid duplicates
+    .distinct()
 )
 
+print("✅ Changed accounts identified:", df_changed.count())
+df_changed.show(5, truncate=False)
 
-# -----------------------------------------------------------
-# STEP 2: Create new active versions from latest snapshot
-# -----------------------------------------------------------
-# We:
-# - Join changed accounts with latest snapshot (df_snapshot)
-# - Create a new record version
-# - Set effective_start_date to current time
-# - Keep effective_end_date as NULL (still active)
-# - Mark is_current = True
+
+# ------------------------------------------------------------
+# STEP 2: Build new current versions from latest snapshot
+# ------------------------------------------------------------
+# We join the changed accounts with the latest snapshot
+# (df_snapshot) to create new SCD2 records that represent
+# the updated version of each account.
+#
+# SCD2 columns are assigned as follows:
+#   effective_start_date → current timestamp
+#   effective_end_date   → NULL (since this is the active version)
+#   is_current           → TRUE
 df_new_versions = (
     df_snapshot
     .join(df_changed, on="account_key", how="inner")
-    .withColumn("effective_start_date", F.current_timestamp())  # start new version
-    .withColumn("effective_end_date", F.lit(None).cast("timestamp"))  # no end yet
-    .withColumn("is_current", F.lit(True))  # mark as current record
+    .withColumn("effective_start_date", F.current_timestamp())
+    .withColumn("effective_end_date", F.lit(None).cast("timestamp"))
+    .withColumn("is_current", F.lit(True))
 )
 
+print("✅ New current versions prepared:", df_new_versions.count())
+df_new_versions.show(5, truncate=False)
 
-# -----------------------------------------------------------
-# STEP 3: Append new versions into the Delta table
-# -----------------------------------------------------------
-# We use append mode because:
-# - Old records are already expired
-# - These are new SCD2 rows (new versions)
-(df_new_versions.write
- .format("delta")
- .mode("append")
- .saveAsTable(target_table))
 
-print("Inserted new current versions for changed accounts")
+# ------------------------------------------------------------
+# STEP 3: Insert new versions into the SCD2 table
+# ------------------------------------------------------------
+# These rows represent the new active version for accounts
+# that experienced attribute changes. We append them to the
+# Delta SCD2 table so history is preserved.
+(
+    df_new_versions.write
+    .format("delta")
+    .mode("append")
+    .saveAsTable(target_table)
+)
 
+print("✅ Inserted new current versions into SCD2 table")
 
 # METADATA ********************
 
@@ -775,42 +973,55 @@ print("Inserted new current versions for changed accounts")
 # META   "language_group": "synapse_pyspark"
 # META }
 
+# MARKDOWN ********************
+
+# #### **Validate SCD2 table**
+
 # CELL ********************
 
-from pyspark.sql import functions as F
+# ------------------------------------------------------------
+# STEP 1: Load the SCD2 dimension table
+# ------------------------------------------------------------
+# This table stores historical versions of account profiles
+# following Slowly Changing Dimension Type 2 (SCD2) logic.
+# Each account can have multiple rows over time, but only
+# one row should have is_current = true.
+df_check = spark.table("gold.dim_account_profile_scd2")
 
-# -----------------------------------------------------------
-# STEP 1: Read the SCD2 target table
-# -----------------------------------------------------------
-# This table contains:
-# - Current active records (is_current = true)
-# - Historical expired records (is_current = false)
-df_scd2 = spark.table(target_table)
+
+# ------------------------------------------------------------
+# STEP 2: Check total number of records
+# ------------------------------------------------------------
+# This shows the total number of rows in the SCD2 table,
+# including both active and historical versions.
+print("✅ Total rows in SCD2 table:", df_check.count())
 
 
-# -----------------------------------------------------------
-# STEP 2: Count records by is_current flag
-# -----------------------------------------------------------
-# We group by is_current to see:
-# - How many active records exist
-# - How many historical records exist
+# ------------------------------------------------------------
+# STEP 3: Validate current vs historical records
+# ------------------------------------------------------------
+# is_current = true  → active/latest record
+# is_current = false → expired historical record
+#
+# This helps verify that SCD2 logic is working correctly
+# after the MERGE and insert operations.
 (
-    df_scd2
+    df_check
     .groupBy("is_current")
     .count()
     .show()
 )
 
-# METADATA ********************
 
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-spark.table("gold.dim_account_profile_scd2").count()
+# ------------------------------------------------------------
+# STEP 4: Display sample records
+# ------------------------------------------------------------
+# Shows a few rows to visually verify:
+# - effective_start_date
+# - effective_end_date
+# - is_current flag
+# - historical versions of accounts
+df_check.show(10, truncate=False)
 
 # METADATA ********************
 
@@ -821,106 +1032,144 @@ spark.table("gold.dim_account_profile_scd2").count()
 
 # MARKDOWN ********************
 
-# #### **Gold – Fact Build: fact_transactions**
+# #### **Gold Layer – Build `fact_transactions`**
 # 
-# #### **Purpose**
-# Create central fact table for transaction analytics.
+# #### **Objective**
+# Create the central fact table for transaction analytics.
 # 
-# This table joins to:
-# - dim_date
-# - dim_transaction_type
-# - dim_account (origin & destination)
-# - dim_account_profile_scd2 (current version)
+# #### **Why this fact table is needed**
+# The Silver layer contains transaction-level data, but it is not yet modeled into a proper star schema.
 # 
-# This enables:
-# - Fraud analysis
-# - Volume trends
-# - Account behavior analysis
-# - Executive dashboards
-
+# A fact table is needed to:
+# 
+# - centralize business measures such as amount and fraud flag
+# - join transaction data to conformed dimensions
+# - support reporting, dashboards, and aggregations
+# - improve semantic model design in Power BI
+# 
+# #### **Dimensions joined**
+# This fact table joins to:
+# 
+# - `gold.dim_date`
+# - `gold.dim_transaction_type`
+# - `gold.dim_account` (origin account)
+# - `gold.dim_account` (destination account)
+# 
+# #### **Measures included**
+# The fact table stores:
+# 
+# - transaction amount
+# - fraud flag
+# - transaction timestamp
+# - batch id for lineage
+# 
+# **Target table**
+# `gold.fact_transactions`
 
 # CELL ********************
 
-from pyspark.sql import functions as F
-
-# -----------------------------------------------------------
+# ------------------------------------------------------------
 # STEP 1: Load source transaction data from Silver layer
-# -----------------------------------------------------------
+# ------------------------------------------------------------
+# This dataset contains cleaned transactional records
+# produced in the Silver layer. It is the primary source
+# for building the fact table in the Gold layer.
 df_silver = spark.table("silver.paysim_transactions_clear")
 
+print("✅ Silver source loaded")
+print("Row count:", df_silver.count())
 
-# -----------------------------------------------------------
-# STEP 2: Build Fact Table by joining all necessary dimensions
-# -----------------------------------------------------------
+
+# ------------------------------------------------------------
+# STEP 2: Join with dimension tables
+# ------------------------------------------------------------
+# The fact table references dimension tables using surrogate
+# keys instead of raw business columns.
+#
+# Dimension joins performed:
+#   dim_date                → date_key
+#   dim_transaction_type    → transaction_type_key
+#   dim_account (origin)    → origin_account_key
+#   dim_account (destination) → destination_account_key
+#
+# This converts raw transactional data into a
+# star schema fact table structure.
 df_fact = (
     df_silver.alias("s")
 
-    # 2a) Join with Date Dimension (gold.dim_date)
-    # Match event timestamp (event_ts) with full_date in dim_date
+    # Join with Date Dimension
     .join(
         spark.table("gold.dim_date").alias("d"),
-        F.to_date("s.event_ts") == F.col("d.full_date"),
+        F.to_date(F.col("s.event_ts")) == F.col("d.full_date"),
         "left"
     )
 
-    # 2b) Join with Transaction Type Dimension (gold.dim_transaction_type)
-    # Match transaction_type string to its surrogate key
+    # Join with Transaction Type Dimension
     .join(
         spark.table("gold.dim_transaction_type").alias("t"),
-        "transaction_type",
+        F.col("s.transaction_type") == F.col("t.transaction_type"),
         "left"
     )
 
-    # 2c) Join with Origin Account Dimension (gold.dim_account)
-    # Map origin_customer_id to account surrogate key
+    # Join with Account Dimension (Origin Account)
     .join(
         spark.table("gold.dim_account").alias("a1"),
         F.col("s.origin_customer_id") == F.col("a1.account_id"),
         "left"
     )
 
-    # 2d) Join with Destination Account Dimension (gold.dim_account)
-    # Map destination_customer_id to account surrogate key
+    # Join with Account Dimension (Destination Account)
     .join(
         spark.table("gold.dim_account").alias("a2"),
         F.col("s.destination_customer_id") == F.col("a2.account_id"),
         "left"
     )
 
-    # 2e) Select Fact Table Columns
+    # --------------------------------------------------------
+    # STEP 3: Select final fact table columns
+    # --------------------------------------------------------
+    # These columns define the star schema structure:
+    #   - Surrogate keys to dimensions
+    #   - Transaction metrics
+    #   - Fraud indicators
+    #   - Metadata for lineage and audit
     .select(
-        F.col("d.date_key"),                               # FK to dim_date
-        F.col("t.transaction_type_key"),                   # FK to dim_transaction_type
-        F.col("a1.account_key").alias("origin_account_key"),       # FK to origin account
-        F.col("a2.account_key").alias("destination_account_key"),  # FK to destination account
-        F.col("s.amount"),                                 # Transaction amount
-        F.col("s.is_fraud"),                               # Fraud flag
-        F.col("s.event_ts"),                               # Original event timestamp
-        F.col("s.batch_id")                               # Batch ID for traceability
+        F.col("s.txn_id").alias("txn_id"),
+        F.col("d.date_key").alias("date_key"),
+        F.col("t.transaction_type_key").alias("transaction_type_key"),
+        F.col("a1.account_key").alias("origin_account_key"),
+        F.col("a2.account_key").alias("destination_account_key"),
+        F.col("s.event_ts").alias("event_ts"),
+        F.col("s.amount").alias("amount"),
+        F.col("s.is_fraud").alias("is_fraud"),
+        F.col("s.is_flagged_fraud").alias("is_flagged_fraud"),
+        F.col("s.transaction_direction").alias("transaction_direction"),
+        F.col("s._batch_id").alias("_batch_id"),
+        F.col("s._ingest_ts").alias("_ingest_ts"),
+        F.col("s._source_file").alias("_source_file"),
+        F.col("s._env").alias("_env")
     )
 )
 
+print("✅ Fact dataframe built")
+df_fact.show(5, truncate=False)
 
-# -----------------------------------------------------------
-# STEP 3: Write Fact Table to Gold layer as Delta Table
-# -----------------------------------------------------------
-(df_fact.write
- .format("delta")       # Delta format for ACID and versioning
- .mode("overwrite")     # Overwrite for initial load
- .saveAsTable("gold.fact_transactions"))
 
-print("Created: gold.fact_transactions")
+# ------------------------------------------------------------
+# STEP 4: Write fact table to Gold layer
+# ------------------------------------------------------------
+# The final fact table is stored in Delta format in the
+# Gold layer. This table will be used for analytics,
+# dashboards, and downstream reporting systems.
+(
+    df_fact.write
+    .format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .saveAsTable("gold.fact_transactions")
+)
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-spark.table("gold.fact_transactions").count()
+print("✅ Created table: gold.fact_transactions")
 
 # METADATA ********************
 
@@ -931,71 +1180,138 @@ spark.table("gold.fact_transactions").count()
 
 # MARKDOWN ********************
 
-# #### **Gold – Aggregate: fraud_summary_daily**
-# 
-# Purpose:
-# Provide daily fraud KPIs for fraud department and risk management.
-# Metrics:
-# - total_transactions
-# - fraud_transactions
-# - fraud_amount
-# - fraud_rate
-
+# #### **Validate fact_transactions**
 
 # CELL ********************
 
-from pyspark.sql import functions as F
+# ------------------------------------------------------------
+# STEP 1: Load the fact_transactions table from Gold layer
+# ------------------------------------------------------------
+# This is the fact table created in the previous cell.
+# It contains transactional data enriched with surrogate keys
+# from the dimensions (dim_date, dim_account, dim_transaction_type).
+df_check = spark.table("gold.fact_transactions")
 
-# -----------------------------------------------------------
-# STEP 1: Load Fact Table (Transactions) from Gold layer
-# -----------------------------------------------------------
+
+# ------------------------------------------------------------
+# STEP 2: Check total number of rows
+# ------------------------------------------------------------
+# This gives a quick count to verify that all source transactions
+# were successfully loaded into the fact table.
+print("✅ Row count in gold.fact_transactions:", df_check.count())
+
+
+# ------------------------------------------------------------
+# STEP 3: Preview key fact table columns
+# ------------------------------------------------------------
+# Show a subset of important columns to ensure:
+# - Dimension keys are correctly joined
+# - Amounts and fraud flags are intact
+# - Basic integrity of the fact table
+df_check.select(
+    "txn_id",                 # unique transaction identifier
+    "date_key",               # foreign key to dim_date
+    "transaction_type_key",   # foreign key to dim_transaction_type
+    "origin_account_key",     # foreign key to origin account
+    "destination_account_key",# foreign key to destination account
+    "amount",                 # transaction amount
+    "is_fraud"                # fraud indicator
+).show(10, truncate=False)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Gold Layer – Build `fraud_summary_daily`**
+# 
+# #### **Objective**
+# Create a daily fraud summary table for risk and fraud analytics.
+# 
+# #### **Why this aggregate is needed**
+# The transaction fact table stores row-level transaction data, but reporting teams often need daily fraud metrics instead of raw transaction records.
+# 
+# This aggregate helps us:
+# 
+# - monitor fraud trends over time
+# - calculate daily fraud rates
+# - summarize fraudulent transaction amounts
+# - support fraud dashboards in Power BI
+# 
+# #### **Measures included**
+# The table contains:
+# 
+# - total transactions
+# - fraud transactions
+# - fraud amount
+# - fraud rate
+# 
+# **Target table**
+# `gold.fraud_summary_daily`
+# 
+# **Source table**
+# `gold.fact_transactions`
+
+# CELL ********************
+
+# ------------------------------------------------------------
+# STEP 1: Load the fact_transactions table from Gold layer
+# ------------------------------------------------------------
+# This fact table contains transactional data enriched with
+# dimension surrogate keys. We'll use it to calculate
+# daily fraud metrics.
 df_fact = spark.table("gold.fact_transactions")
 
+print("✅ Fact table loaded for fraud summary")
+print("Row count:", df_fact.count())
 
-# -----------------------------------------------------------
-# STEP 2: Aggregate daily fraud statistics
-# -----------------------------------------------------------
+
+# ------------------------------------------------------------
+# STEP 2: Aggregate daily fraud metrics
+# ------------------------------------------------------------
+# We calculate the following for each date:
+# - total_transactions      → total number of transactions
+# - fraud_transactions      → count of transactions marked as fraud
+# - fraud_amount            → total amount involved in fraudulent transactions
+# - fraud_rate              → fraction of transactions that are fraudulent
 df_fraud_daily = (
     df_fact
-    .groupBy("date_key")  # Group by date
+    .groupBy("date_key")
     .agg(
-        # Count total transactions for each day
         F.count("*").alias("total_transactions"),
-
-        # Count fraudulent transactions for each day
         F.sum("is_fraud").alias("fraud_transactions"),
-
-        # Sum the amounts of fraudulent transactions only
-        F.sum(F.when(F.col("is_fraud") == 1, F.col("amount")).otherwise(0)).alias("fraud_amount")
+        F.sum(
+            F.when(F.col("is_fraud") == 1, F.col("amount")).otherwise(0)
+        ).alias("fraud_amount")
     )
-    # Add fraud rate column (fraud transactions / total transactions)
     .withColumn(
         "fraud_rate",
         F.col("fraud_transactions") / F.col("total_transactions")
     )
 )
 
+print("✅ Fraud summary dataframe created")
+df_fraud_daily.show(10, truncate=False)
 
-# -----------------------------------------------------------
-# STEP 3: Write the Daily Fraud Summary to Gold layer
-# -----------------------------------------------------------
-(df_fraud_daily.write
- .format("delta")          # Write in Delta format for versioning and ACID compliance
- .mode("overwrite")        # Overwrite the table for this run
- .saveAsTable("gold.fraud_summary_daily"))
 
-print("Created: gold.fraud_summary_daily")
+# ------------------------------------------------------------
+# STEP 3: Write fraud_summary_daily to Gold layer
+# ------------------------------------------------------------
+# The resulting table is a daily summary of fraud metrics.
+# Stored in Delta format for analytics, reporting, and dashboards.
+(
+    df_fraud_daily.write
+    .format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .saveAsTable("gold.fraud_summary_daily")
+)
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-spark.table("gold.fraud_summary_daily").count()
+print("✅ Created table: gold.fraud_summary_daily")
 
 # METADATA ********************
 
@@ -1006,80 +1322,133 @@ spark.table("gold.fraud_summary_daily").count()
 
 # MARKDOWN ********************
 
-# #### **Gold – Aggregate: exec_kpi_daily**
-# 
-# Purpose:
-# Provide executive-level KPIs for transaction monitoring.
-# 
-# Metrics:
-# - total_transactions
-# - total_amount
-# - avg_transaction_amount
-# - active_accounts
-# - debit_amount
-# - credit_amount
-
+# #### **Validate fraud_summary_daily**
 
 # CELL ********************
 
-from pyspark.sql import functions as F
+# ------------------------------------------------------------
+# STEP 1: Load fraud_summary_daily from Gold layer
+# ------------------------------------------------------------
+# This table contains daily fraud metrics:
+# - total_transactions: total transactions per day
+# - fraud_transactions: count of fraudulent transactions
+# - fraud_amount: total amount involved in fraud
+# - fraud_rate: fraction of transactions that were fraudulent
+df_check = spark.table("gold.fraud_summary_daily")
 
-# -----------------------------------------------------------
-# STEP 1: Load Fact Table (Transactions) from Gold layer
-# -----------------------------------------------------------
+# ------------------------------------------------------------
+# STEP 2: Check total number of rows
+# ------------------------------------------------------------
+# Provides a quick check of how many daily records exist.
+print("✅ Row count in gold.fraud_summary_daily:", df_check.count())
+
+# ------------------------------------------------------------
+# STEP 3: Preview first 10 rows ordered by date_key
+# ------------------------------------------------------------
+# Ordering by date_key allows chronological inspection of trends.
+df_check.orderBy("date_key").show(10, truncate=False)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Gold Layer – Build `exec_kpi_daily`**
+# 
+# #### **Objective**
+# Create a daily executive KPI summary table for transaction monitoring.
+# 
+# #### **Why this aggregate is needed**
+# While the fact table contains transaction-level data, executives typically require summarized daily KPIs instead of row-level detail.
+# 
+# This aggregate helps provide:
+# 
+# - total daily transaction volume
+# - total transaction value
+# - average transaction value
+# - number of active accounts
+# - gross daily amount movement
+# 
+# These KPIs are useful for dashboards, trend analysis, and executive decision-making.
+# 
+# #### **Measures included**
+# The table contains:
+# 
+# - total transactions
+# - total amount
+# - average transaction amount
+# - active accounts
+# - gross amount
+# 
+# **Target table**
+# `gold.exec_kpi_daily`
+# 
+# **Source table**
+# `gold.fact_transactions`
+
+# CELL ********************
+
+# ============================================================
+# GOLD CELL-28: Build exec_kpi_daily
+# ============================================================
+
+# ------------------------------------------------------------
+# STEP 1: Load the fact_transactions table
+# ------------------------------------------------------------
+# This fact table contains transactional records with
+# enriched dimension surrogate keys. We will use it to
+# calculate executive-level daily KPIs.
 df_fact = spark.table("gold.fact_transactions")
 
+print("✅ Fact table loaded for executive KPI summary")
+print("Row count:", df_fact.count())
 
-# -----------------------------------------------------------
-# STEP 2: Aggregate Executive KPIs on Daily Level
-# -----------------------------------------------------------
+
+# ------------------------------------------------------------
+# STEP 2: Aggregate daily executive KPIs
+# ------------------------------------------------------------
+# KPIs calculated per date:
+# - total_transactions       → total number of transactions
+# - total_amount             → sum of transaction amounts
+# - avg_transaction_amount   → average transaction value
+# - active_accounts          → count of distinct origin accounts (daily active users)
+# - gross_amount             → sum of all positive transaction amounts
 df_exec_kpi = (
     df_fact
-    .groupBy("date_key")  # Grouping by the date
+    .groupBy("date_key")
     .agg(
-        # Total number of transactions for the day
         F.count("*").alias("total_transactions"),
-
-        # Total transaction amount for the day
         F.sum("amount").alias("total_amount"),
-
-        # Average transaction amount for the day
         F.avg("amount").alias("avg_transaction_amount"),
-
-        # Number of distinct active accounts (origin account) for the day
         F.countDistinct("origin_account_key").alias("active_accounts"),
-
-        # Gross transaction amount where:
-        # - Transaction type exists (is not null)
-        # - Amount is positive
         F.sum(
-            F.when(F.col("transaction_type_key").isNotNull() & 
-                   (F.col("amount") > 0), F.col("amount"))
+            F.when(F.col("amount") > 0, F.col("amount")).otherwise(0)
         ).alias("gross_amount")
     )
 )
 
+print("✅ Executive KPI dataframe created")
+df_exec_kpi.show(10, truncate=False)
 
-# -----------------------------------------------------------
-# STEP 3: Write the KPI Aggregation to Gold layer
-# -----------------------------------------------------------
-(df_exec_kpi.write
- .format("delta")         # Using Delta format for ACID compliance and versioning
- .mode("overwrite")       # Overwrite for the latest daily data
- .saveAsTable("gold.exec_kpi_daily"))  # Save results to the target table
 
-print("Created: gold.exec_kpi_daily")
+# ------------------------------------------------------------
+# STEP 3: Write exec_kpi_daily to Gold layer
+# ------------------------------------------------------------
+# The resulting table contains daily executive KPIs,
+# useful for dashboards and high-level reporting.
+(
+    df_exec_kpi.write
+    .format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .saveAsTable("gold.exec_kpi_daily")
+)
 
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-spark.table("gold.exec_kpi_daily").count()
+print("✅ Created table: gold.exec_kpi_daily")
 
 # METADATA ********************
 
@@ -1090,39 +1459,104 @@ spark.table("gold.exec_kpi_daily").count()
 
 # MARKDOWN ********************
 
-# #### **Gold – Aggregate: ops_data_quality_daily**
-# 
-# Purpose:
-# Provide daily data quality and pipeline health metrics.
-# 
-# Metrics:
-# - total_rows
-# - valid_rows
-# - reject_rows
-# - reject_rate
+# #### **Validate exec_kpi_daily**
 
 # CELL ********************
 
-from pyspark.sql import functions as F
+# ------------------------------------------------------------
+# STEP 1: Load exec_kpi_daily from Gold layer
+# ------------------------------------------------------------
+# This table contains daily executive KPIs such as total
+# transactions, total amount, average transaction amount,
+# active accounts, and gross amount.
+df_check = spark.table("gold.exec_kpi_daily")
 
-# -----------------------------------------------------------
-# STEP 1: Load Source Tables
-# -----------------------------------------------------------
+# ------------------------------------------------------------
+# STEP 2: Check total row count
+# ------------------------------------------------------------
+# This gives a quick check of how many daily KPI records exist.
+print("✅ Row count in gold.exec_kpi_daily:", df_check.count())
 
-# Bronze layer (raw ingestion data)
-df_bronze = spark.table("bronze.paysim_transactions_raw")
+# ------------------------------------------------------------
+# STEP 3: Preview the first 10 rows ordered by date
+# ------------------------------------------------------------
+# Ordering by date_key ensures chronological view.
+# This allows visual validation of trends over time.
+df_check.orderBy("date_key").show(10, truncate=False)
 
-# Silver layer (validated & cleaned records)
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Gold Layer – Build `ops_data_quality_daily`**
+# 
+# #### **Objective**
+# Create a daily operational data quality summary table.
+# 
+# #### **Why this aggregate is needed**
+# The Silver pipeline splits transactions into:
+# 
+# - valid rows → written to Silver
+# - rejected rows → written to DQ quarantine
+# 
+# To monitor pipeline health and data quality trends, we need a daily summary table.
+# 
+# This aggregate helps us:
+# 
+# - track valid rows per day
+# - track rejected rows per day
+# - calculate total processed rows
+# - calculate reject rate
+# 
+# This is useful for operational dashboards and monitoring.
+# 
+# #### **Measures included**
+# The table contains:
+# 
+# - event_date
+# - valid_rows
+# - reject_rows
+# - total_rows
+# - reject_rate
+# 
+# **Target table**
+# `gold.ops_data_quality_daily`
+# 
+# **Source tables**
+# - `silver.paysim_transactions_clear`
+# - `dq.paysim_rejects`
+
+# CELL ********************
+
+# ------------------------------------------------------------
+# STEP 1: Load valid Silver transactions
+# ------------------------------------------------------------
+# The Silver layer contains all cleaned and accepted transactions.
 df_silver_valid = spark.table("silver.paysim_transactions_clear")
 
-# Rejected records captured by DQ checks
+print("✅ Silver valid table loaded")
+print("Row count:", df_silver_valid.count())
+
+
+# ------------------------------------------------------------
+# STEP 2: Load rejected transactions from DQ quarantine
+# ------------------------------------------------------------
+# These are rows that failed data quality checks during ingestion.
 df_reject = spark.table("dq.paysim_rejects")
 
+print("✅ DQ reject table loaded")
+print("Row count:", df_reject.count())
 
-# -----------------------------------------------------------
-# STEP 2: Calculate Daily Valid Row Counts
-# -----------------------------------------------------------
-# Count how many records passed validation per day
+
+# ------------------------------------------------------------
+# STEP 3: Aggregate valid transactions by event_date
+# ------------------------------------------------------------
+# Count the number of valid rows per day.
 df_valid_daily = (
     df_silver_valid
     .groupBy(F.to_date("event_ts").alias("event_date"))
@@ -1132,10 +1566,10 @@ df_valid_daily = (
 )
 
 
-# -----------------------------------------------------------
-# STEP 3: Calculate Daily Rejected Row Counts
-# -----------------------------------------------------------
-# Count how many records failed validation per day
+# ------------------------------------------------------------
+# STEP 4: Aggregate rejected transactions by event_date
+# ------------------------------------------------------------
+# Count the number of rejected rows per day.
 df_reject_daily = (
     df_reject
     .groupBy(F.to_date("event_ts").alias("event_date"))
@@ -1144,43 +1578,38 @@ df_reject_daily = (
     )
 )
 
-# -----------------------------------------------------------
-# STEP 4: Combine Valid + Reject Counts
-# -----------------------------------------------------------
+
+# ------------------------------------------------------------
+# STEP 5: Join valid + reject counts and calculate metrics
+# ------------------------------------------------------------
+# Combine valid and reject counts to compute operational DQ metrics:
+# - total_rows  → total rows processed per day
+# - reject_rate → fraction of rows that failed DQ
 df_ops = (
     df_valid_daily
-    .join(df_reject_daily, on="event_date", how="left")  # keep all valid dates
-    .fillna({"reject_rows": 0})  # if no rejects, set to 0
-
-    # Total rows processed
-    .withColumn("total_rows",
-                F.col("valid_rows") + F.col("reject_rows"))
-
-    # Reject rate = rejected / total processed
-    .withColumn("reject_rate",
-                F.col("reject_rows") / F.col("total_rows"))
+    .join(df_reject_daily, on="event_date", how="left")
+    .fillna({"reject_rows": 0})
+    .withColumn("total_rows", F.col("valid_rows") + F.col("reject_rows"))
+    .withColumn("reject_rate", F.col("reject_rows") / F.col("total_rows"))
 )
 
-# -----------------------------------------------------------
-# STEP 5: Write Daily Data Quality Summary to Gold layer
-# -----------------------------------------------------------
-(df_ops.write
- .format("delta")
- .mode("overwrite")  # Overwrite for full daily refresh
- .saveAsTable("gold.ops_data_quality_daily"))
+print("✅ Operational DQ summary dataframe created")
+df_ops.show(10, truncate=False)
 
-print("Created: gold.ops_data_quality_daily")
 
-# METADATA ********************
+# ------------------------------------------------------------
+# STEP 6: Write ops_data_quality_daily to Gold layer
+# ------------------------------------------------------------
+# Stores daily DQ metrics for operational monitoring and reporting.
+(
+    df_ops.write
+    .format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .saveAsTable("gold.ops_data_quality_daily")
+)
 
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-spark.table("gold.ops_data_quality_daily").count()
+print("✅ Created table: gold.ops_data_quality_daily")
 
 # METADATA ********************
 
@@ -1189,8 +1618,34 @@ spark.table("gold.ops_data_quality_daily").count()
 # META   "language_group": "synapse_pyspark"
 # META }
 
+# MARKDOWN ********************
+
+# #### **Validate ops_data_quality_daily**
+
 # CELL ********************
 
+# ------------------------------------------------------------
+# STEP 1: Load ops_data_quality_daily from Gold layer
+# ------------------------------------------------------------
+# This table contains daily operational data quality metrics:
+# - valid_rows: number of accepted transactions
+# - reject_rows: number of rejected transactions
+# - total_rows: total rows processed
+# - reject_rate: fraction of rejected rows
+df_check = spark.table("gold.ops_data_quality_daily")
+
+# ------------------------------------------------------------
+# STEP 2: Check total number of rows
+# ------------------------------------------------------------
+# Provides a quick check of how many daily records exist.
+print("✅ Row count in gold.ops_data_quality_daily:", df_check.count())
+
+# ------------------------------------------------------------
+# STEP 3: Preview first 10 rows ordered by event_date
+# ------------------------------------------------------------
+# Ordering by event_date allows visual inspection of DQ trends
+# over time to quickly identify days with high rejection rates.
+df_check.orderBy("event_date").show(10, truncate=False)
 
 # METADATA ********************
 
