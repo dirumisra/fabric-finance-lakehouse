@@ -48,9 +48,6 @@ import uuid
 # Read pipeline parameters (Enterprise)
 # ===============================
 
-p_env = str(p_env).upper()
-p_load_type = str(p_load_type).upper()
-
 # Function to fetch parameter from dbutils.widgets and return it, or None if not found
 def _get_param(name):
     try:
