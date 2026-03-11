@@ -708,45 +708,6 @@ spark.table("meta.pipeline_run_audit").show(truncate=False)
 
 # MARKDOWN ********************
 
-# ### **Create schema explicitly to avoid Spark inference errors**
-
-# CELL ********************
-
-# ------------------------------------------------------------
-# Create schema explicitly to avoid Spark inference errors
-# ------------------------------------------------------------
-
-from pyspark.sql.types import *
-from pyspark.sql import Row
-
-schema = StructType([
-    StructField("run_id", StringType(), True),
-    StructField("pipeline_name", StringType(), True),
-    StructField("activity_name", StringType(), True),
-    StructField("layer", StringType(), True),
-    StructField("start_time", TimestampType(), True),
-    StructField("end_time", TimestampType(), True),
-    StructField("status", StringType(), True),
-    StructField("duration_seconds", DoubleType(), True),
-    StructField("error_message", StringType(), True),
-    StructField("created_at", TimestampType(), True)
-])
-
-# ------------------------------------------------------------
-# Convert Row object to DataFrame using schema
-# ------------------------------------------------------------
-
-activity_audit_df = spark.createDataFrame([activity_audit_row], schema=schema)
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# MARKDOWN ********************
-
 # #### **STEP 11 — Insert Notebook Activity Audit Record**
 # 
 # #### **Objective**
@@ -773,44 +734,37 @@ activity_audit_df = spark.createDataFrame([activity_audit_row], schema=schema)
 # STEP 11: Write notebook activity audit record
 # ============================================================
 
-# Import required Spark data types to define schema explicitly
+# Import required data types for explicit schema definition
 from pyspark.sql.types import (
     StructType, StructField, StringType, TimestampType, DoubleType
 )
 
-# This step writes one notebook-level audit record into
-# meta.pipeline_activity_audit for the current notebook execution.
+# ------------------------------------------------------------
+# Define notebook activity details
+# ------------------------------------------------------------
 
-# Name of the notebook activity
+# Name of the current notebook activity
 activity_name = "nb_05_data_quality_checks"
 
-# Logical layer of the pipeline where this activity belongs
+# Layer name for monitoring
 layer = "dq"
 
-# Notebook start time captured earlier
+# Start and end time of notebook execution
 activity_start_time = notebook_start_time
-
-# Capture end time when notebook finishes
 activity_end_time = datetime.now()
 
-# Since execution succeeded, status is SUCCESS
+# Notebook execution status (default is SUCCESS)
 activity_status = "SUCCESS"
 
-# Keep empty string instead of None to avoid Spark type inference issues
+# Keep error message blank because notebook succeeded (will capture in case of failure)
 activity_error_message = ""
 
-# ------------------------------------------------------------
-# Calculate notebook execution duration
-# ------------------------------------------------------------
-
+# Calculate total runtime in seconds
 duration_seconds = float((activity_end_time - activity_start_time).total_seconds())
 
 # ------------------------------------------------------------
-# Define schema explicitly (best practice)
+# Define schema explicitly to avoid PySpark inference issues
 # ------------------------------------------------------------
-# This prevents PySpark from trying to infer column types,
-# which can fail when values like None are present.
-
 activity_audit_schema = StructType([
     StructField("run_id", StringType(), True),
     StructField("pipeline_name", StringType(), True),
@@ -825,40 +779,64 @@ activity_audit_schema = StructType([
 ])
 
 # ------------------------------------------------------------
-# Create the data row for the activity audit
+# Try to execute the notebook logic and handle errors
 # ------------------------------------------------------------
+try:
+    # Create activity audit data
+    activity_audit_data = [(
+        str(p_pipeline_run_id),
+        "pl_finance_e2e_batch",
+        activity_name,
+        layer,
+        activity_start_time,
+        activity_end_time,
+        activity_status,
+        duration_seconds,
+        activity_error_message,
+        datetime.now()
+    )]
 
-activity_audit_data = [(
-    str(p_pipeline_run_id),          # pipeline run identifier
-    "pl_finance_e2e_batch",          # pipeline name
-    activity_name,                   # activity / notebook name
-    layer,                           # pipeline layer
-    activity_start_time,             # activity start timestamp
-    activity_end_time,               # activity end timestamp
-    activity_status,                 # SUCCESS / FAILED
-    duration_seconds,                # execution time in seconds
-    activity_error_message,          # error message if failure
-    datetime.now()                   # audit record creation time
-)]
+    # Convert activity audit data into Spark DataFrame
+    activity_audit_df = spark.createDataFrame(
+        activity_audit_data,
+        schema=activity_audit_schema
+    )
 
-# ------------------------------------------------------------
-# Create DataFrame using explicit schema
-# ------------------------------------------------------------
+    # Append audit record into activity audit table
+    activity_audit_df.write.mode("append").saveAsTable("meta.pipeline_activity_audit")
 
-activity_audit_df = spark.createDataFrame(
-    activity_audit_data,
-    schema=activity_audit_schema
-)
+    # Print success message (or use logging for more production-grade output)
+    print("SUCCESS: Notebook activity audit record inserted")
 
-# ------------------------------------------------------------
-# Write record into audit table
-# ------------------------------------------------------------
-# mode("append") ensures each activity run inserts a new record
+except Exception as e:
+    # If something goes wrong, mark the activity as FAILED and capture the error
+    activity_status = "FAILED"
+    activity_error_message = str(e)
+    
+    # Log the failure in the audit table (still insert the record)
+    activity_audit_data = [(
+        str(p_pipeline_run_id),
+        "pl_finance_e2e_batch",
+        activity_name,
+        layer,
+        activity_start_time,
+        activity_end_time,
+        activity_status,
+        duration_seconds,
+        activity_error_message,
+        datetime.now()
+    )]
 
-activity_audit_df.write.mode("append").saveAsTable("meta.pipeline_activity_audit")
+    # Convert activity audit data into Spark DataFrame and insert
+    activity_audit_df = spark.createDataFrame(
+        activity_audit_data,
+        schema=activity_audit_schema
+    )
 
-# Confirmation log
-print("SUCCESS: Notebook activity audit record inserted")
+    activity_audit_df.write.mode("append").saveAsTable("meta.pipeline_activity_audit")
+
+    # Log the error
+    print(f"ERROR: Notebook activity failed with error: {activity_error_message}")
 
 # METADATA ********************
 
@@ -874,16 +852,6 @@ print("SUCCESS: Notebook activity audit record inserted")
 # ============================================================
 
 spark.table("meta.pipeline_activity_audit").show(truncate=False)
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
 
 # METADATA ********************
 
