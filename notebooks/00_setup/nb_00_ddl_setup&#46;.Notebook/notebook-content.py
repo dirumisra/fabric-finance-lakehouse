@@ -281,3 +281,154 @@ display(spark.sql("SELECT * FROM meta.etl_watermark"))
 # META   "language": "python",
 # META   "language_group": "synapse_pyspark"
 # META }
+
+# MARKDOWN ********************
+
+# #### **Meta Layer – Create `pipeline_activity_audit`**
+# 
+# #### **Objective**
+# Create an audit table to store one record per notebook activity execution.
+# 
+# #### **Why this table is needed**
+# The pipeline run audit table tracks the overall pipeline execution.
+# 
+# This activity audit table tracks each notebook separately, which helps with:
+# 
+# - notebook-level monitoring
+# - runtime analysis
+# - troubleshooting failed activities
+# - identifying slow pipeline steps
+# 
+# **Target table**
+# `meta.pipeline_activity_audit`
+
+# CELL ********************
+
+# ============================================================
+# STEP: Create meta.pipeline_activity_audit table
+# ============================================================
+
+# Create the metadata schema if it does not already exist.
+# This schema is typically used to store operational metadata
+# such as pipeline audits, activity logs, and monitoring tables.
+spark.sql("""
+CREATE SCHEMA IF NOT EXISTS meta
+""")
+
+# ------------------------------------------------------------
+# Create the activity-level audit table
+# ------------------------------------------------------------
+# This table captures execution details for each pipeline activity
+# (for example: Bronze load, Silver transformation, Gold aggregation).
+#
+# Unlike pipeline_run_audit (which tracks the whole pipeline),
+# this table tracks individual steps within the pipeline.
+
+spark.sql("""
+CREATE TABLE IF NOT EXISTS meta.pipeline_activity_audit (
+    
+    -- Unique identifier of the pipeline run
+    run_id STRING,
+    
+    -- Name of the pipeline executing the activity
+    pipeline_name STRING,
+    
+    -- Name of the specific activity / notebook step
+    activity_name STRING,
+    
+    -- Data layer where this activity operates
+    -- Example: bronze / silver / gold
+    layer STRING,
+    
+    -- Timestamp when the activity started
+    start_time TIMESTAMP,
+    
+    -- Timestamp when the activity finished
+    end_time TIMESTAMP,
+    
+    -- Execution result of the activity
+    -- Possible values: SUCCESS / FAILED
+    status STRING,
+    
+    -- Total execution time of the activity in seconds
+    duration_seconds DOUBLE,
+    
+    -- Error message captured if the activity failed
+    error_message STRING,
+    
+    -- Timestamp when the audit record was created
+    created_at TIMESTAMP
+)
+
+-- Store the table using Delta Lake format
+-- This allows ACID transactions, time travel, and efficient updates
+USING DELTA
+""")
+
+# Log message confirming table creation
+print("✅ Created table: meta.pipeline_activity_audit")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Validate pipeline_activity_audit table creation**
+
+# CELL ********************
+
+# ============================================================
+# STEP: Validate pipeline_activity_audit table creation
+# ============================================================
+
+spark.table("meta.pipeline_activity_audit").printSchema()
+spark.table("meta.pipeline_activity_audit").show(5, truncate=False)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Insert Pipeline Run Audit Record**
+# 
+# This step records the pipeline execution details in the
+# `meta.pipeline_run_audit` table.
+# 
+# This allows monitoring:
+# 
+# - pipeline run history
+# - execution time
+# - success or failure status
+# - environment used
+
+# CELL ********************
+
+from pyspark.sql import Row
+from datetime import datetime
+
+run_id = dbutils.widgets.get("p_pipeline_run_id")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
