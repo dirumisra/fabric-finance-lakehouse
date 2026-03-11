@@ -8,22 +8,16 @@
           "workspaceId": "00000000-0000-0000-0000-000000000000",
           "parameters": {
             "p_env": {
-              "value": {
-                "value": "@pipeline().parameters.p_env",
-                "type": "Expression"
-              },
+              "value": "dev",
               "type": "string"
             },
             "p_load_type": {
-              "value": {
-                "value": "@pipeline().parameters.p_load_type",
-                "type": "Expression"
-              },
+              "value": "FULL",
               "type": "string"
             },
             "p_source_file": {
               "value": {
-                "value": "@pipeline().parameters.p_source_file",
+                "value": "paysim_transactions_full_20260214.csv",
                 "type": "Expression"
               },
               "type": "string"
@@ -38,13 +32,13 @@
           }
         },
         "policy": {
-          "timeout": "0.12:00:00",
-          "retry": 0,
+          "timeout": "12:00:00",
+          "retry": 2,
           "retryIntervalInSeconds": 30,
           "secureInput": false,
           "secureOutput": false
         },
-        "name": "nb_bronze_ingest",
+        "name": "nb_bronze_ingest_transactions",
         "dependsOn": []
       },
       {
@@ -54,24 +48,11 @@
           "workspaceId": "00000000-0000-0000-0000-000000000000",
           "parameters": {
             "p_env": {
-              "value": {
-                "value": "@pipeline().parameters.p_env",
-                "type": "Expression"
-              },
+              "value": "dev",
               "type": "string"
             },
             "p_load_type": {
-              "value": {
-                "value": "@pipeline().parameters.p_load_type",
-                "type": "Expression"
-              },
-              "type": "string"
-            },
-            "p_source_file": {
-              "value": {
-                "value": "@pipeline().parameters.p_source_file",
-                "type": "Expression"
-              },
+              "value": "FULL",
               "type": "string"
             },
             "p_pipeline_run_id": {
@@ -84,16 +65,16 @@
           }
         },
         "policy": {
-          "timeout": "0.12:00:00",
-          "retry": 0,
+          "timeout": "12:00:00",
+          "retry": 2,
           "retryIntervalInSeconds": 30,
           "secureInput": false,
           "secureOutput": false
         },
-        "name": "nb_silver_transform",
+        "name": "nb_silver_transform_transactions",
         "dependsOn": [
           {
-            "activity": "nb_bronze_ingest",
+            "activity": "nb_bronze_ingest_transactions",
             "dependencyConditions": [
               "Completed"
             ]
@@ -107,17 +88,11 @@
           "workspaceId": "00000000-0000-0000-0000-000000000000",
           "parameters": {
             "p_env": {
-              "value": {
-                "value": "@pipeline().parameters.p_env",
-                "type": "Expression"
-              },
+              "value": "dev",
               "type": "string"
             },
             "p_load_type": {
-              "value": {
-                "value": "@pipeline().parameters.p_load_type",
-                "type": "Expression"
-              },
+              "value": "FULL",
               "type": "string"
             },
             "p_pipeline_run_id": {
@@ -126,10 +101,43 @@
                 "type": "Expression"
               },
               "type": "string"
+            }
+          }
+        },
+        "policy": {
+          "timeout": "12:00:00",
+          "retry": 2,
+          "retryIntervalInSeconds": 30,
+          "secureInput": false,
+          "secureOutput": false
+        },
+        "name": "nb_gold_build_transactions_model",
+        "dependsOn": [
+          {
+            "activity": "nb_silver_transform_transactions",
+            "dependencyConditions": [
+              "Completed"
+            ]
+          }
+        ]
+      },
+      {
+        "type": "TridentNotebook",
+        "typeProperties": {
+          "notebookId": "100fc556-7bf3-a42b-40e4-030a68146989",
+          "workspaceId": "00000000-0000-0000-0000-000000000000",
+          "parameters": {
+            "p_env": {
+              "value": "dev",
+              "type": "string"
             },
-            "p_source_file": {
+            "p_load_type": {
+              "value": "FULL",
+              "type": "string"
+            },
+            "p_pipeline_run_id": {
               "value": {
-                "value": "@pipeline().parameters.p_source_file",
+                "value": "@pipeline().RunId",
                 "type": "Expression"
               },
               "type": "string"
@@ -137,39 +145,62 @@
           }
         },
         "policy": {
-          "timeout": "0.12:00:00",
-          "retry": 0,
+          "timeout": "12:00:00",
+          "retry": 2,
           "retryIntervalInSeconds": 30,
           "secureInput": false,
           "secureOutput": false
         },
-        "name": "nb_gold_build",
+        "name": "nb_gold_optimize_tables",
         "dependsOn": [
           {
-            "activity": "nb_silver_transform",
+            "activity": "nb_gold_build_transactions_model",
+            "dependencyConditions": [
+              "Completed"
+            ]
+          }
+        ]
+      },
+      {
+        "type": "TridentNotebook",
+        "typeProperties": {
+          "notebookId": "c354b6fd-0f1b-86b7-403b-b21fe056fe5f",
+          "workspaceId": "00000000-0000-0000-0000-000000000000",
+          "parameters": {
+            "p_env": {
+              "value": "dev",
+              "type": "string"
+            },
+            "p_load_type": {
+              "value": "FULL",
+              "type": "string"
+            },
+            "p_pipeline_run_id": {
+              "value": {
+                "value": "@pipeline().RunId",
+                "type": "Expression"
+              },
+              "type": "string"
+            }
+          }
+        },
+        "policy": {
+          "timeout": "12:00:00",
+          "retry": 2,
+          "retryIntervalInSeconds": 30,
+          "secureInput": false,
+          "secureOutput": false
+        },
+        "name": "nb_05_data_quality_checks",
+        "dependsOn": [
+          {
+            "activity": "nb_gold_optimize_tables",
             "dependencyConditions": [
               "Completed"
             ]
           }
         ]
       }
-    ],
-    "parameters": {
-      "p_env": {
-        "type": "string",
-        "defaultValue": "DEV"
-      },
-      "p_load_type": {
-        "type": "string",
-        "defaultValue": "FULL"
-      },
-      "p_pipeline_run_id": {
-        "type": "string"
-      },
-      "p_source_file": {
-        "type": "string",
-        "defaultValue": "paysim_transactions_full_20260214.csv"
-      }
-    }
+    ]
   }
 }
