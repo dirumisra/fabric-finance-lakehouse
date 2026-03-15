@@ -395,34 +395,6 @@ spark.table("meta.pipeline_activity_audit").show(5, truncate=False)
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# MARKDOWN ********************
-
-# #### **Insert Pipeline Run Audit Record**
-# 
-# This step records the pipeline execution details in the
-# `meta.pipeline_run_audit` table.
-# 
-# This allows monitoring:
-# 
-# - pipeline run history
-# - execution time
-# - success or failure status
-# - environment used
-
-# CELL ********************
-
-from pyspark.sql import Row
-from datetime import datetime
-
-run_id = dbutils.widgets.get("p_pipeline_run_id")
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
 # CELL ********************
 
 
