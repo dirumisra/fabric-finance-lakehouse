@@ -210,7 +210,17 @@
               ]
             }
           ],
-          "ifFalseActivities": []
+          "ifFalseActivities": [
+            {
+              "type": "Fail",
+              "typeProperties": {
+                "message": "INVALID_LOAD_TYPE",
+                "errorCode": "INVALID_LOAD_TYPE"
+              },
+              "name": "Fail_Invalid_load_type",
+              "dependsOn": []
+            }
+          ]
         },
         "name": "if_full_load_path",
         "dependsOn": []

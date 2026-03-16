@@ -139,6 +139,36 @@ print("p_pipeline_run_id =", p_pipeline_run_id)
 
 # MARKDOWN ********************
 
+# #### **Initialize activity monitoring**
+
+# CELL ********************
+
+# ============================================================
+# Initialize activity monitoring
+# ============================================================
+
+from datetime import datetime
+
+activity_start_time = datetime.now()
+
+pipeline_name = "pl_finance_e2e_batch"
+activity_name = "nb_02_silver_paysim_transform"
+layer = "silver"
+
+print("Activity monitoring initialized")
+print("Run ID:", p_pipeline_run_id)
+print("Activity:", activity_name)
+print("Start Time:", activity_start_time)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
 # #### **Read Watermark (Silver Incremental Control)**
 
 # CELL ********************
@@ -730,6 +760,88 @@ FROM meta.etl_watermark
 WHERE pipeline_name = 'pl_finance_e2e_batch'
 AND entity_name = 'paysim_transactions'
 """).show(truncate=False)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+#### **Write notebook activity audit record**
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# ============================================================
+# STEP: Write notebook activity audit record
+# ============================================================
+
+from datetime import datetime
+from pyspark.sql.types import StructType, StructField, StringType, TimestampType, DoubleType
+
+activity_end_time = datetime.now()
+
+duration_seconds = float((activity_end_time - activity_start_time).total_seconds())
+
+audit_schema = StructType([
+    StructField("run_id", StringType(), True),
+    StructField("pipeline_name", StringType(), True),
+    StructField("activity_name", StringType(), True),
+    StructField("layer", StringType(), True),
+    StructField("start_time", TimestampType(), True),
+    StructField("end_time", TimestampType(), True),
+    StructField("status", StringType(), True),
+    StructField("duration_seconds", DoubleType(), True),
+    StructField("error_message", StringType(), True),
+    StructField("created_at", TimestampType(), True)
+])
+
+audit_data = [
+    (
+        str(p_pipeline_run_id),
+        str(pipeline_name),
+        str(activity_name),
+        str(layer),
+        activity_start_time,
+        activity_end_time,
+        "SUCCESS",
+        duration_seconds,
+        None,
+        datetime.now()
+    )
+]
+
+audit_df = spark.createDataFrame(audit_data, schema=audit_schema)
+
+audit_df.write.mode("append").saveAsTable("meta.pipeline_activity_audit")
+
+print("SUCCESS: Silver notebook activity audit record inserted")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Validation**
+
+# CELL ********************
+
+spark.table("meta.pipeline_activity_audit") \
+.filter("activity_name = 'nb_02_silver_paysim_transform'") \
+.show(truncate=False)
 
 # METADATA ********************
 

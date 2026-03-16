@@ -24,7 +24,162 @@
 
 # Import required libraries
 from delta.tables import DeltaTable
+
+# Import PySpark SQL functions (like col, sum, max, when, etc.)
+# We use "F" as a short alias to make code cleaner (e.g., F.col("column_name"))
 from pyspark.sql import functions as F
+
+# Import Window functions
+# Used for operations like row_number(), rank(), lead(), lag() over partitions
+from pyspark.sql.window import Window
+
+# Import datetime module
+# Used to work with dates and timestamps (e.g., current time, formatting dates)
+from datetime import datetime
+
+# Import uuid module
+# Used to generate unique IDs (for example, unique transaction IDs or batch IDs)
+import uuid
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Retrieve Pipeline Parameter**
+
+# CELL ********************
+
+# ============================================================
+# STEP 0: Retrieve Pipeline Parameters
+# Purpose: Read the pipeline run ID passed from the orchestration pipeline.
+# If the notebook is executed manually (outside the pipeline),
+# assign a default value to identify the run.
+# ============================================================
+
+try:
+    # Fetch pipeline run ID from notebook parameters
+    p_pipeline_run_id = mssparkutils.notebook.params.get("p_pipeline_run_id")
+except:
+    # Default value used when notebook is executed manually
+    p_pipeline_run_id = "MANUAL_RUN"
+
+
+# ============================================================
+# STEP 1: Initialize Activity Monitoring
+# Purpose: Capture metadata required for monitoring the notebook execution,
+# including start time, pipeline name, activity name, and processing layer.
+# This information can later be used for logging, auditing, and debugging.
+# ============================================================
+
+from datetime import datetime
+
+# Record activity start time for execution tracking
+activity_start_time = datetime.now()
+
+# Define pipeline and activity metadata
+pipeline_name = "pl_finance_e2e_batch"
+activity_name = "nb_03_gold_model_build"
+layer = "gold"
+
+# Print execution details for logging and troubleshooting
+print("Activity monitoring initialized")
+print("Run ID:", p_pipeline_run_id)
+print("Activity:", activity_name)
+print("Start Time:", activity_start_time)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Activity Audit Record**
+
+# CELL ********************
+
+# ============================================================
+# STEP: Write Notebook Activity Audit Record
+# Purpose: Capture execution metadata for the current notebook
+# activity and store it in the pipeline activity audit table.
+# This helps track execution status, duration, and errors for
+# monitoring, troubleshooting, and operational reporting.
+# ============================================================
+
+from datetime import datetime
+from pyspark.sql.types import StructType, StructField, StringType, TimestampType, DoubleType
+
+# Record the activity end time
+activity_end_time = datetime.now()
+
+# Calculate total execution duration in seconds
+duration_seconds = float((activity_end_time - activity_start_time).total_seconds())
+
+# Define schema for the audit log table
+audit_schema = StructType([
+    StructField("run_id", StringType(), True),          # Unique pipeline run identifier
+    StructField("pipeline_name", StringType(), True),   # Name of the pipeline triggering the notebook
+    StructField("activity_name", StringType(), True),   # Notebook or activity name
+    StructField("layer", StringType(), True),           # Data processing layer (e.g., bronze, silver, gold)
+    StructField("start_time", TimestampType(), True),   # Activity start timestamp
+    StructField("end_time", TimestampType(), True),     # Activity completion timestamp
+    StructField("status", StringType(), True),          # Execution status (SUCCESS / FAILED)
+    StructField("duration_seconds", DoubleType(), True),# Total runtime of the activity
+    StructField("error_message", StringType(), True),   # Error details if execution fails
+    StructField("created_at", TimestampType(), True)    # Record creation timestamp
+])
+
+# Prepare audit record data
+audit_data = [
+    (
+        str(p_pipeline_run_id),   # Pipeline run ID
+        str(pipeline_name),       # Pipeline name
+        str(activity_name),       # Activity / notebook name
+        str(layer),               # Data layer
+        activity_start_time,      # Start time
+        activity_end_time,        # End time
+        "SUCCESS",                # Execution status
+        duration_seconds,         # Duration of execution
+        None,                     # No error message since execution succeeded
+        datetime.now()            # Audit record creation timestamp
+    )
+]
+
+# Create Spark DataFrame for audit logging
+audit_df = spark.createDataFrame(audit_data, schema=audit_schema)
+
+# Append the audit record into the metadata audit table
+audit_df.write.mode("append").saveAsTable("meta.pipeline_activity_audit")
+
+# Log confirmation message
+print("SUCCESS: Gold notebook activity audit record inserted")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Validate**
+
+# CELL ********************
+
+spark.sql("""
+SELECT *
+FROM meta.pipeline_activity_audit
+WHERE activity_name = 'nb_03_gold_model_build'
+ORDER BY start_time DESC
+""").show(truncate=False)
 
 # METADATA ********************
 
@@ -1322,7 +1477,7 @@ print("✅ Created table: gold.fraud_summary_daily")
 
 # MARKDOWN ********************
 
-# ####**Validate fraud_summary_daily**
+# #### **Validate fraud_summary_daily**
 
 # CELL ********************
 
@@ -1646,6 +1801,34 @@ print("✅ Row count in gold.ops_data_quality_daily:", df_check.count())
 # Ordering by event_date allows visual inspection of DQ trends
 # over time to quickly identify days with high rejection rates.
 df_check.orderBy("event_date").show(10, truncate=False)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+
+# CELL ********************
+
+activity_name = "nb_03_gold_model_build"
+layer = "gold"
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+spark.table("meta.pipeline_activity_audit") \
+    .filter("activity_name = 'nb_03_gold_model_build'") \
+    .show(truncate=False)
 
 # METADATA ********************
 

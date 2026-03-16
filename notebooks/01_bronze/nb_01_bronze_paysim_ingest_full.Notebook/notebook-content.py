@@ -114,6 +114,36 @@ print("p_pipeline_run_id =", p_pipeline_run_id)  # Print the pipeline run ID
 
 # MARKDOWN ********************
 
+# #### **Initialize activity monitoring**
+
+# CELL ********************
+
+# ============================================================
+# STEP 1: Initialize activity monitoring
+# ============================================================
+
+from datetime import datetime
+
+activity_start_time = datetime.now()
+
+pipeline_name = "pl_finance_e2e_batch"
+activity_name = "nb_01_bronze_paysim_ingest_full"
+layer = "bronze"
+
+print("Activity monitoring initialized")
+print("Run ID:", p_pipeline_run_id)
+print("Activity:", activity_name)
+print("Start Time:", activity_start_time)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
 #  #### **Read Watermark**
 
 # CELL ********************
@@ -510,6 +540,109 @@ df_log = spark.createDataFrame(log_entry, schema=log_schema) \
 df_log.write.format("delta").mode("append").saveAsTable("log.pipeline_run_log")
 
 print("✅ Pipeline run logged successfully. run_id =", run_id)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Write notebook activity audit record**
+
+# CELL ********************
+
+# ============================================================
+# STEP X: Write notebook activity audit record
+# This step logs execution details of the current notebook
+# activity into the audit table for monitoring and debugging.
+# ============================================================
+
+# Import required Spark SQL data types for defining schema
+from pyspark.sql.types import (
+    StructType, StructField, StringType, TimestampType, DoubleType
+)
+
+# Import datetime module to capture timestamps
+from datetime import datetime
+
+# Capture notebook/activity end time
+# This marks when the current notebook activity finished execution
+activity_end_time = datetime.now()
+
+# Mark current activity execution status
+# If the notebook reaches here without exception, mark as SUCCESS
+activity_status = "SUCCESS"
+
+# Keep error message blank because execution completed successfully
+# This field will contain error details in case of failure
+activity_error_message = ""
+
+# Calculate activity execution duration in seconds
+# Subtract start time from end time and convert to seconds
+duration_seconds = float((activity_end_time - activity_start_time).total_seconds())
+
+# Explicitly define schema for the activity audit DataFrame
+# This ensures correct column types when writing to the audit table
+activity_audit_schema = StructType([
+    StructField("run_id", StringType(), True),          # Unique pipeline run identifier
+    StructField("pipeline_name", StringType(), True),   # Name of the pipeline
+    StructField("activity_name", StringType(), True),   # Name of the notebook/activity
+    StructField("layer", StringType(), True),           # Data layer (Bronze/Silver/Gold)
+    StructField("start_time", TimestampType(), True),   # Activity start timestamp
+    StructField("end_time", TimestampType(), True),     # Activity end timestamp
+    StructField("status", StringType(), True),          # Execution status (SUCCESS/FAILED)
+    StructField("duration_seconds", DoubleType(), True),# Total execution time in seconds
+    StructField("error_message", StringType(), True),   # Error message if failure occurs
+    StructField("created_at", TimestampType(), True)    # Audit record creation timestamp
+])
+
+# Prepare a single activity audit record as a tuple
+# Values correspond to the schema defined above
+activity_audit_data = [(
+    str(p_pipeline_run_id),     # Pipeline run ID
+    pipeline_name,              # Pipeline name
+    activity_name,              # Activity/notebook name
+    layer,                      # Data layer being processed
+    activity_start_time,        # Start time of activity
+    activity_end_time,          # End time of activity
+    activity_status,            # Execution status
+    duration_seconds,           # Total duration
+    activity_error_message,     # Error message (blank if success)
+    datetime.now()              # Record creation timestamp
+)]
+
+# Convert the activity audit record into a Spark DataFrame
+activity_audit_df = spark.createDataFrame(
+    activity_audit_data,
+    schema=activity_audit_schema
+)
+
+# Append the audit record into the pipeline activity audit table
+# Using append mode ensures previous records are preserved
+activity_audit_df.write.mode("append").saveAsTable("meta.pipeline_activity_audit")
+
+# Print confirmation message after successful insert
+print("SUCCESS: Bronze notebook activity audit record inserted")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# MARKDOWN ********************
+
+# #### **Validation**
+
+# CELL ********************
+
+spark.table("meta.pipeline_activity_audit") \
+.filter("activity_name = 'nb_01_bronze_paysim_ingest_full'") \
+.show(truncate=False)
 
 # METADATA ********************
 
