@@ -10,8 +10,7 @@
         "endDateTime": "2027-03-31T23:59:00",
         "localTimeZoneId": "India Standard Time",
         "times": [
-          "10:00",
-          "17:00"
+          "06:00"
         ]
       }
     }
