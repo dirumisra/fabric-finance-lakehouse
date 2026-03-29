@@ -1,4 +1,26 @@
+DEV → UAT Checklist
 
+✔ All notebooks run successfully in DEV  
+✔ FULL pipeline runs successfully  
+✔ INCR pipeline runs successfully  
+✔ DQ checks pass  
+✔ No temporary test code (like raise Exception)  
+✔ Activity audit logging working  
+✔ Failure handling working  
+✔ Parameters working correctly  
+✔ No hardcoded values  
+
+DEV → UAT Checklist
+
+✔ Pipeline tested in UAT  
+✔ Business validation completed  
+✔ No failed runs in UAT  
+✔ Schedule configured correctly  
+✔ FULL and INCR triggers verified  
+✔ Error handling verified  
+✔ No debug/test code  
+✔ Final version approved  
+--------------------------------------------------------------------------------------------------------------------------------------
  docs/
    - 01_Project_Overview.md
    - 02_Architecture.md
