@@ -1,12 +1,12 @@
 
  docs/
-   01_Project_Overview.md
-   02_Architecture.md
-   03_Pipeline_Design.md
-   04_Notebook_Design.md
-   05_Data_Model.md
-   06_CICD_Strategy.md
-   07_Testing_Strategy.md
+   - 01_Project_Overview.md
+   - 02_Architecture.md
+   - 03_Pipeline_Design.md
+   - 04_Notebook_Design.md
+   - 05_Data_Model.md
+   - 06_CICD_Strategy.md
+   - 07_Testing_Strategy.md
 ------------------------------------------------------------------------------------------------------------------------   
 ----01_Project_Overview.md
 # Project Overview — Finance Data Engineering Pipeline
