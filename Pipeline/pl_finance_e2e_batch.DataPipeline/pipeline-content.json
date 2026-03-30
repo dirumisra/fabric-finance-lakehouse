@@ -5,7 +5,7 @@
         "type": "IfCondition",
         "typeProperties": {
           "expression": {
-            "value": "@equals(pipeline().parameters.p_load_type,'XYZ')",
+            "value": "@equals(pipeline().parameters.p_load_type,'Full')",
             "type": "Expression"
           },
           "ifTrueActivities": [
@@ -444,7 +444,7 @@
     "parameters": {
       "p_load_type": {
         "type": "string",
-        "defaultValue": "XYZ"
+        "defaultValue": "Full"
       }
     }
   }
