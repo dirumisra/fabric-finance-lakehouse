@@ -247,14 +247,14 @@ fabric-finance-lakehouse/
 4. Configure Lakehouse connection
 5. Run `nb_00_ddl_setup` first
 6. Execute pipeline:
-   - FULL: Set `p_load_type = FULL`
-   - INCR: Set `p_load_type = INCR`
+   - FULL: Set `p_load_type = FULL.`
+   - INCR: Set `p_load_type = INCR.`
 
 ---
 
 ## 👤 Author
 
-**Dhiru Misra**
+**Dhiraj Misra**
 📧 your.email@gmail.com
-🔗 [LinkedIn](https://linkedin.com/in/yourprofile)
-🐙 [GitHub](https://github.com/yourusername)
+🔗 [LinkedIn](https://www.linkedin.com/in/dirumisra/)
+🐙 [GitHub](https://github.com/dirumisra)
