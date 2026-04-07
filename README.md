@@ -255,6 +255,6 @@ fabric-finance-lakehouse/
 ## 👤 Author
 
 **Dhiraj Misra**
-📧 your.email@gmail.com
+📧 dhirajk266@gmail.com@gmail.com
 🔗 [LinkedIn](https://www.linkedin.com/in/dirumisra/)
 🐙 [GitHub](https://github.com/dirumisra)
