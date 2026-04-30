@@ -1,5 +1,5 @@
 # 🏦 Finance Data Engineering Pipeline — Microsoft Fabric
-
+![Fabric Finance Lakehouse Architecture](your-image-url)
 ![Microsoft Fabric](https://img.shields.io/badge/Microsoft-Fabric-blue)
 ![PySpark](https://img.shields.io/badge/PySpark-3.x-orange)
 ![Delta Lake](https://img.shields.io/badge/Delta-Lake-green)
